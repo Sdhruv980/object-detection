@@ -21,8 +21,20 @@
       <h1 class="hero-title">Object Detection<br><span class="accent">Lab</span></h1>
       <p class="hero-sub">
         Upload an image, video, or use your webcam. The model detects every object and — with a free
-        Gemini API key — generates a rich AI description of the full scene.
+        Gemini API key — generates a rich AI description and full deep scene object detection.
       </p>
+
+      <!-- API KEY SETTINGS BAR -->
+      <div class="api-key-bar" id="api-key-bar">
+        <div class="api-key-status" id="api-key-status">
+          <span class="key-icon">🔑</span>
+          <span id="api-key-label">Checking API key…</span>
+        </div>
+        <div class="api-key-inputs" id="api-key-inputs">
+          <input type="password" id="user-gemini-key" placeholder="Paste Gemini API Key (e.g. AIzaSy...)" autocomplete="off" />
+          <button class="btn-key-save" onclick="saveUserApiKey()">Save Key</button>
+        </div>
+      </div>
     </header>
 
     <!-- ══════════════════════════════════  STEP 01 – SOURCE  ══════════════════════════════════ -->

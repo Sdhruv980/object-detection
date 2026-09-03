@@ -87,18 +87,58 @@ function fmtTime(s) {
   return `${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
 }
 
+// ── Gemini Key Management ───────────────────────────────────────────────────
+function getEffectiveApiKey() {
+  const winKey = (typeof window !== 'undefined' && window.GEMINI_API_KEY && window.GEMINI_API_KEY !== 'YOUR_GEMINI_API_KEY_HERE')
+    ? window.GEMINI_API_KEY
+    : '';
+  const localKey = (typeof localStorage !== 'undefined' ? (localStorage.getItem('GEMINI_API_KEY') || '') : '');
+  return localKey || winKey || '';
+}
+
+function updateApiKeyUI() {
+  const key = getEffectiveApiKey();
+  const label = document.getElementById('api-key-label');
+  const input = document.getElementById('user-gemini-key');
+
+  if (key) {
+    geminiKey = key;
+    if (label) label.innerHTML = `<span style="color:#34d399;font-weight:bold">● GEMINI ACTIVE</span> (${key.slice(0, 4)}…${key.slice(-4)})`;
+    if (input) input.placeholder = 'Update API key…';
+    if (badgeText) badgeText.textContent = 'MODEL: COCO-SSD + GEMINI FLASH · IN-BROWSER + VISION API';
+    setStatus('MODEL READY', 'COCO + GEMINI', true);
+  } else {
+    geminiKey = '';
+    if (label) label.innerHTML = `<span style="color:#f87171;font-weight:bold">○ GEMINI OFF</span> (Paste key below to activate full detection)`;
+    if (badgeText) badgeText.textContent = 'MODEL: COCO-SSD · RUNNING IN-BROWSER';
+    setStatus('MODEL READY', 'COCO-SSD', true);
+  }
+}
+
+function saveUserApiKey() {
+  const input = document.getElementById('user-gemini-key');
+  const val = input ? input.value.trim() : '';
+  if (val) {
+    localStorage.setItem('GEMINI_API_KEY', val);
+    if (typeof window !== 'undefined') window.GEMINI_API_KEY = val;
+    geminiKey = val;
+    input.value = '';
+    updateApiKeyUI();
+    alert('✓ Gemini API key saved! Full AI object detection is now active.');
+  } else {
+    alert('Please enter a valid Gemini API key.');
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // COCO-SSD
 // ═══════════════════════════════════════════════════════════════════════════
 async function loadCocoModel() {
   setStatus('LOADING MODEL…', '', false);
+  updateApiKeyUI();
   try {
     cocoModel = await cocoSsd.load({ base: 'mobilenet_v2' });
-    const hasKey = geminiKey && geminiKey !== 'YOUR_GEMINI_API_KEY_HERE';
-    setStatus('MODEL READY', hasKey ? 'COCO + GEMINI' : 'COCO-SSD', true);
-    if (hasKey) {
-      badgeText.textContent = 'MODEL: COCO-SSD + GEMINI 3.7 FLASH · IN-BROWSER + API';
-    }
+    updateApiKeyUI();
   } catch (e) {
     setStatus('LOAD FAILED', '', false);
     console.error(e);
@@ -228,31 +268,33 @@ async function verifyDetectionsWithGemini(resizedCanvas, preds) {
 
   const uniqueClasses = [...new Set((preds || []).map(p => p.class))];
 
-  const verifyPrompt = `You are a world-class AI vision and object detection system.
-The local COCO detector identified these candidate labels in this image: ${uniqueClasses.length ? uniqueClasses.join(', ') : 'none'}.
+  const verifyPrompt = `You are a world-class computer vision object detection system.
+The local detector found only: ${uniqueClasses.length ? uniqueClasses.join(', ') : 'none'}.
 
-Examine the image with extreme attention to detail:
-1. Verify if any detected labels are misclassified. Common confusion corrections:
-   - Water bottle, tumbler, flask, shaker, thermos (often labeled as "vase", "cup") -> correct to "bottle"
-   - Computer mouse (often labeled as "cell phone" or "remote") -> correct to "mouse"
-   - TV/AC remote (often labeled as "cell phone") -> correct to "remote"
-   - Mug or cup (often labeled as "bowl") -> correct to "cup"
-   - Book or notebook (often labeled as "laptop") -> correct to "book"
-2. Detect any small or missed objects in the scene that COCO missed (such as bottle cap, lid, pen, phone, watch, mouse, cup, glass, coins, keys, glasses).
-   For any missed object, provide its label and normalized bounding box [ymin, xmin, ymax, xmax] scaled 0 to 1000.
+Exhaustively detect ALL objects in this image (both prominent and small), including:
+- Furniture & Seating: sofa, couch, armchair, chair, coffee table, side table, TV console, cabinets, desk, shelves
+- Electronics & Appliances: television/TV, wall clock, floor lamp, chandelier, ceiling light, laptop, computer, mouse, remote, phone
+- Decor & Small Items: potted plants, flowers, vase, cushions/pillows, rug/carpet, statues/sculptures, books, bottles, cups, glasses, bottle cap, keys
+- Architectural elements: stairs/staircase, fireplace, door, window
 
-Return ONLY a JSON object adhering to this schema:
+Also verify & correct any misclassified labels (e.g. vase -> bottle, cell phone -> mouse or remote).
+
+Return ONLY valid JSON:
 {
   "corrections": [
     {"detected": "vase", "correct": "bottle"}
   ],
-  "missed_objects": [
-    {"label": "bottle cap", "box": [ymin, xmin, ymax, xmax]}
+  "detected_objects": [
+    {"label": "television", "box": [ymin, xmin, ymax, xmax]},
+    {"label": "armchair", "box": [ymin, xmin, ymax, xmax]},
+    {"label": "sofa", "box": [ymin, xmin, ymax, xmax]},
+    {"label": "coffee table", "box": [ymin, xmin, ymax, xmax]},
+    {"label": "chandelier", "box": [ymin, xmin, ymax, xmax]},
+    {"label": "floor lamp", "box": [ymin, xmin, ymax, xmax]},
+    {"label": "wall clock", "box": [ymin, xmin, ymax, xmax]}
   ]
 }
-If no corrections or missed objects, return:
-{"corrections": [], "missed_objects": []}
-Do not include any explanation or markdown — raw JSON only.`;
+Coordinates [ymin, xmin, ymax, xmax] must be normalized integers between 0 and 1000. Output pure JSON without markdown.`;
 
   const apiCanvas = resizeImage(resizedCanvas, 800);
   const base64 = apiCanvas.toDataURL('image/jpeg', 0.88).split(',')[1];
@@ -264,8 +306,9 @@ Do not include any explanation or markdown — raw JSON only.`;
     ]}],
     generationConfig: {
       temperature: 0.1,
-      maxOutputTokens: 1500,
-      responseMimeType: 'application/json'
+      maxOutputTokens: 2500,
+      responseMimeType: 'application/json',
+      thinkingConfig: { thinkingBudget: 0 }
     }
   };
 
@@ -301,30 +344,47 @@ Do not include any explanation or markdown — raw JSON only.`;
       Object.assign(geminiLabelOverrides, corrMap);
     }
 
-    let corrected = (preds || []).map(p => {
+    let corrected = [...(preds || [])].map(p => {
       const fix = corrMap[p.class.toLowerCase()];
       return fix ? { ...p, class: fix, geminiCorrected: true } : p;
     });
 
-    // Add missed small objects detected by Gemini
-    const missed = result.missed_objects || [];
-    if (Array.isArray(missed) && missed.length) {
+    // Add all detected objects from Gemini with smart IoU deduplication
+    const geminiObjs = result.detected_objects || result.missed_objects || (Array.isArray(result) ? result : []);
+    if (Array.isArray(geminiObjs) && geminiObjs.length) {
       const w = resizedCanvas.width;
       const h = resizedCanvas.height;
-      for (const obj of missed) {
+      for (const obj of geminiObjs) {
         if (obj.box && Array.isArray(obj.box) && obj.box.length === 4) {
           const [ymin, xmin, ymax, xmax] = obj.box;
           const px = Math.round((xmin / 1000) * w);
           const py = Math.round((ymin / 1000) * h);
           const pw = Math.round(((xmax - xmin) / 1000) * w);
           const ph = Math.round(((ymax - ymin) / 1000) * h);
-          if (pw > 4 && ph > 4) {
-            corrected.push({
-              class: obj.label || 'object',
-              score: 0.95,
-              bbox: [px, py, pw, ph],
-              geminiAdded: true
+
+          if (pw > 6 && ph > 6) {
+            // Check overlap with existing detection
+            const existingIdx = corrected.findIndex(p => {
+              const [ex, ey, ew, eh] = p.bbox;
+              const xOverlap = Math.max(0, Math.min(px + pw, ex + ew) - Math.max(px, ex));
+              const yOverlap = Math.max(0, Math.min(py + ph, ey + eh) - Math.max(py, ey));
+              const intersection = xOverlap * yOverlap;
+              const union = (pw * ph) + (ew * eh) - intersection;
+              const iou = union > 0 ? intersection / union : 0;
+              return iou > 0.45;
             });
+
+            if (existingIdx !== -1) {
+              corrected[existingIdx].class = obj.label || corrected[existingIdx].class;
+              corrected[existingIdx].geminiCorrected = true;
+            } else {
+              corrected.push({
+                class: obj.label || 'object',
+                score: 0.95,
+                bbox: [px, py, pw, ph],
+                geminiAdded: true
+              });
+            }
           }
         }
       }
@@ -773,8 +833,9 @@ async function analyzeBillFrame(dataUrl) {
     }],
     generationConfig: {
       temperature: 0.1,
-      maxOutputTokens: 1500,
-      responseMimeType: "application/json"
+      maxOutputTokens: 2500,
+      responseMimeType: "application/json",
+      thinkingConfig: { thinkingBudget: 0 }
     }
   };
 
