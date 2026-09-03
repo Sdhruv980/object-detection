@@ -1,7 +1,6 @@
-﻿services:
-  - type: web
+services:
+  - type: static
     name: object-detection
-    runtime: static
     buildCommand: node -e "const fs = require('fs'); const key = process.env.GEMINI_API_KEY || ''; fs.writeFileSync('config.js', 'window.GEMINI_API_KEY = ' + JSON.stringify(key) + ';');"
     staticPublishPath: .
     envVars:
