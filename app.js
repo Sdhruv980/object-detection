@@ -14,7 +14,7 @@ const GEMINI_API_KEY = (typeof window !== 'undefined' && (window.GEMINI_API_KEY 
   : '';
 
 // ── Config ──────────────────────────────────────────────────────────────────
-const GEMINI_MODEL  = 'gemini-3.6-flash';
+const GEMINI_MODEL  = 'gemini-flash-latest';
 const GEMINI_URL    = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 const MAX_IMG_PX    = 1920;
 const CONF_IMG      = 0.15;
@@ -692,7 +692,7 @@ function checkDuplicateBill(newBill, existingBills) {
   return false;
 }
 
-const FALLBACK_MODELS = ['gemini-3.6-flash', 'gemini-2.5-flash', 'gemini-1.5-flash'];
+const FALLBACK_MODELS = ['gemini-flash-latest', 'gemini-3.7-flash', 'gemini-3.5-flash', 'gemini-flash-lite-latest'];
 
 async function analyzeBillFrame(dataUrl) {
   const key = GEMINI_API_KEY || (typeof window !== 'undefined' && window.GEMINI_API_KEY);
