@@ -8,9 +8,9 @@
  * API key is loaded from config.js (generated from .env — never commit config.js).
  */
 
-// ── Gemini API Key — loaded from config.js (see .env) ────────────────────────
-const GEMINI_API_KEY = (typeof window !== 'undefined' && window.GEMINI_API_KEY)
-  ? window.GEMINI_API_KEY
+// ── Gemini API Key — loaded from config.js or localStorage ──────────────────
+const GEMINI_API_KEY = (typeof window !== 'undefined' && (window.GEMINI_API_KEY || localStorage.getItem('GEMINI_API_KEY')))
+  ? (window.GEMINI_API_KEY || localStorage.getItem('GEMINI_API_KEY'))
   : '';
 
 // ── Config ──────────────────────────────────────────────────────────────────
