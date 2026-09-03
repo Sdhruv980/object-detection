@@ -1,0 +1,22 @@
+﻿# Secrets — never commit these
+.env
+config.js
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.venv/
+
+# Outputs
+outputs/
+inputs/
+
+# Models
+*.pt
+*.onnx
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Object Detection Lab</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <div class="grid-bg"></div>
+
+  <div class="wrapper">
+
+    <!-- ══════════════════════════════════  HEADER  ══════════════════════════════════ -->
+    <header class="site-header">
+      <div class="model-badge">
+        <span class="dot"></span>
+        <span id="badge-text">MODEL: COCO-SSD · RUNNING IN-BROWSER</span>
+      </div>
+      <h1 class="hero-title">Object Detection<br><span class="accent">Lab</span></h1>
+      <p class="hero-sub">
+        Upload an image, video, or use your webcam. The model detects every object and — with a free
+        Gemini API key — generates a rich AI description of the full scene.
+      </p>
+    </header>
+
+    <!-- ══════════════════════════════════  STEP 01 – SOURCE  ══════════════════════════════════ -->
+    <section class="section">
+
+
+      <div class="step-label"><span class="step-num">01</span> SELECT INPUT SOURCE</div>
+
+      <div class="cards">
+        <div class="card active" id="card-image" data-mode="image" onclick="selectMode('image')">
+          <div class="card-top">
+            <span class="source-tag">SOURCE / <span class="accent">STATIC</span></span>
+            <span class="card-letter">I</span>
+          </div>
+          <h2 class="card-title">Image</h2>
+          <p class="card-desc">Upload a photo. One detection pass — every object boxed and labeled.</p>
+        </div>
+
+        <div class="card" id="card-video" data-mode="video" onclick="selectMode('video')">
+          <div class="card-top">
+            <span class="source-tag">SOURCE / FILE</span>
+            <span class="card-letter">V</span>
+          </div>
+          <h2 class="card-title">Video</h2>
+          <p class="card-desc">Upload a video file. Detection runs on every frame as it plays.</p>
+        </div>
+
+        <div class="card" id="card-webcam" data-mode="webcam" onclick="selectMode('webcam')">
+          <div class="card-top">
+            <span class="source-tag">SOURCE / LIVE</span>
+            <span class="card-letter">W</span>
+          </div>
+          <h2 class="card-title">Webcam</h2>
+          <p class="card-desc">Use your camera. Detection runs live, frame by frame.</p>
+        </div>
+
+        <div class="card" id="card-bill" data-mode="bill" onclick="selectMode('bill')">
+          <div class="card-top">
+            <span class="source-tag">SOURCE / <span class="accent" style="color:#f0c040">BILLS</span></span>
+            <span class="card-letter" style="color:#f0c040">₹</span>
+          </div>
+          <h2 class="card-title">Bill Scanner</h2>
+          <p class="card-desc">Upload a video showing bills one by one. Gemini extracts structured data from every bill after the video ends.</p>
+        </div>
+      </div>
+
+      <div class="action-row">
+        <button class="btn-primary" id="action-btn" onclick="handleAction()">Choose image</button>
+        <button class="btn-ghost"   id="stop-btn"   style="display:none" onclick="stopDetection()">&#9632; Stop</button>
+      </div>
+
+      <input type="file" id="image-input" accept="image/*"  style="display:none" onchange="loadImage(event)" />
+      <input type="file" id="video-input" accept="video/*"  style="display:none" onchange="loadVideo(event)" />
+      <input type="file" id="bill-input"  accept="video/*"  style="display:none" onchange="loadBillVideo(event)" />
+    </section>
+
+    <!-- ══════════════════════════════════  STEP 02 – OUTPUT  ══════════════════════════════════ -->
+    <section class="section">
+      <div class="step-label"><span class="step-num">02</span> DETECTION OUTPUT</div>
+
+      <div class="detection-layout">
+
+        <!-- LEFT: Canvas -->
+        <div class="canvas-wrap">
+          <span class="bracket tl"></span>
+          <span class="bracket tr"></span>
+          <span class="bracket bl"></span>
+          <span class="bracket br"></span>
+
+          <video id="vid-src" style="display:none" muted playsinline></video>
+          <canvas id="main-canvas"></canvas>
+
+          <!-- VIDEO CONTROLS -->
+          <div class="vid-controls" id="vid-controls">
+            <div class="scrubber-track" id="scrubber-track">
+              <div class="scrubber-fill"  id="scrubber-fill"></div>
+              <div class="scrubber-thumb" id="scrubber-thumb"></div>
+            </div>
+            <div class="vid-ctrl-row">
+              <button class="vc-btn" onclick="togglePlay()" title="Play / Pause">
+                <svg id="icon-play"  viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
+                <svg id="icon-pause" viewBox="0 0 24 24" width="18" height="18" fill="currentColor" style="display:none"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+              </button>
+              <button class="vc-btn" onclick="toggleMute()" title="Mute / Unmute">
+                <svg id="icon-vol" viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                  <polygon points="3,9 7,9 12,4 12,20 7,15 3,15"/>
+                  <path d="M15 9a5 5 0 0 1 0 6M18 6a9 9 0 0 1 0 12"/>
+                </svg>
+                <svg id="icon-muted" viewBox="0 0 24 24" width="18" height="18" fill="currentColor" style="display:none">
+                  <polygon points="3,9 7,9 12,4 12,20 7,15 3,15"/>
+                  <line x1="17" y1="9" x2="23" y2="15" stroke="currentColor" stroke-width="2"/>
+                  <line x1="23" y1="9" x2="17" y2="15" stroke="currentColor" stroke-width="2"/>
+                </svg>
+              </button>
+              <span class="vc-time" id="vc-time">0:00 / 0:00</span>
+            </div>
+          </div>
+
+          <div class="canvas-placeholder" id="canvas-placeholder">
+            <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+              <rect x="4" y="4" width="40" height="40" rx="4" stroke="#1e4a7a" stroke-width="2" stroke-dasharray="6 3"/>
+              <circle cx="24" cy="22" r="7" stroke="#1e4a7a" stroke-width="2"/>
+              <path d="M10 38 Q24 26 38 38" stroke="#1e4a7a" stroke-width="2" fill="none"/>
+            </svg>
+            <p>No source loaded yet</p>
+          </div>
+        </div>
+
+        <!-- RIGHT: Manifest + Description -->
+        <div class="right-panel">
+
+          <!-- Detection Manifest -->
+          <div class="manifest-panel">
+            <div class="manifest-header">
+              <span class="manifest-title">DETECTION<br>MANIFEST</span>
+              <span class="model-status" id="model-status">LOADING…</span>
+            </div>
+            <div class="manifest-body" id="manifest-body">
+              <p class="manifest-empty">No objects detected yet. Load an image or start video to populate this list.</p>
+            </div>
+          </div>
+
+          <!-- AI Scene Description -->
+          <div class="desc-panel" id="desc-panel">
+            <div class="desc-header">
+              <span class="desc-title">AI SCENE DESCRIPTION</span>
+              <span class="desc-badge" id="desc-badge">BLIP</span>
+            </div>
+            <div class="desc-body" id="desc-body">
+              <p class="manifest-empty">Add a Gemini API key above to generate a detailed AI scene description.</p>
+            </div>
+            <div class="desc-actions">
+              <button class="btn-copy" id="copy-btn" style="display:none" onclick="copyDescription()">Copy text</button>
+              <button class="btn-refresh" id="refresh-btn" onclick="refreshDescription()" title="Refresh AI description">↻ Refresh</button>
+            </div>
+          </div>
+
+          <!-- Bill Scanner Results -->
+          <div class="bill-results-panel" id="bill-results-panel" style="display:none">
+            <div class="desc-header">
+              <span class="desc-title">BILL SCANNER</span>
+              <span class="desc-badge" id="bill-results-badge" style="background:rgba(240,192,64,.15);border-color:rgba(240,192,64,.4);color:#f0c040">GEMINI</span>
+            </div>
+            <div id="bill-progress" style="display:none">
+              <p class="manifest-empty" id="bill-progress-text">⟳ Processing video…</p>
+              <div class="bill-progress-bar"><div class="bill-progress-fill" id="bill-progress-fill"></div></div>
+            </div>
+            <div id="bill-results-body">
+              <p class="manifest-empty">Upload a bill video to start scanning.</p>
+            </div>
+            <div class="desc-actions" id="bill-export-row" style="display:none">
+              <button class="btn-refresh" onclick="exportBillsJSON()" title="Export as JSON">⬇ Export JSON</button>
+              <button class="btn-copy"   onclick="exportBillsCSV()"  title="Export as CSV" style="display:inline-flex">⬇ Export CSV</button>
+            </div>
+          </div>
+
+        </div><!-- /right-panel -->
+
+      </div>
+    </section>
+
+    <!-- FOOTER -->
+    <footer class="site-footer">
+      DETECTION-LAB v1.0 &nbsp;·&nbsp;
+      <strong>COCO-SSD</strong> TF.js in-browser &nbsp;·&nbsp;
+      <strong>Gemini 1.5 Flash</strong> scene description (free API key) &nbsp;·&nbsp;
+      80 object classes
+    </footer>
+
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
