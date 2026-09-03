@@ -17,7 +17,7 @@ const GEMINI_API_KEY = (typeof window !== 'undefined' && (window.GEMINI_API_KEY 
 const GEMINI_MODEL  = 'gemini-flash-latest';
 const GEMINI_URL    = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 const MAX_IMG_PX    = 1920;
-const CONF_IMG      = 0.15;
+const CONF_IMG      = 0.08;   // lower threshold → detects small and low-contrast objects
 const CONF_VIDEO    = 0.12;   // lower threshold → catches phones, bottles, mouse, etc.
 const CONF_WEBCAM   = 0.10;   // even lower for live webcam (lighting varies)
 
@@ -134,17 +134,57 @@ function canvasToBlob(c, quality) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// GEMINI API CALLER (Supports fallback models and safe part concatenation)
+// ═══════════════════════════════════════════════════════════════════════════
+async function callGeminiApi(payload) {
+  const key = geminiKey || GEMINI_API_KEY || (typeof window !== 'undefined' && window.GEMINI_API_KEY) || (typeof localStorage !== 'undefined' && localStorage.getItem('GEMINI_API_KEY'));
+  if (!key || key === 'YOUR_GEMINI_API_KEY_HERE') {
+    throw new Error('Gemini API key is missing. Please set it in config.js or .env');
+  }
+
+  let lastError = null;
+  for (const modelName of FALLBACK_MODELS) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${key}`;
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (!resp.ok) {
+        const errTxt = await resp.text();
+        let msg = `HTTP ${resp.status}`;
+        try { msg = JSON.parse(errTxt).error?.message || msg; } catch (_) {}
+        lastError = new Error(msg);
+        continue;
+      }
+
+      const data = await resp.json();
+      let text = '';
+      for (const p of data?.candidates?.[0]?.content?.parts || []) {
+        if (p.text) text += p.text;
+      }
+      return text.trim();
+    } catch (e) {
+      lastError = e;
+    }
+  }
+
+  throw lastError || new Error('All Gemini API endpoints failed.');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // GEMINI VISION — scene description
-// Uses gemini-3.7-flash multimodal API (free tier: 15 req/min, 1500/day).
 // ═══════════════════════════════════════════════════════════════════════════
 async function describeImage(resizedCanvas) {
-  const hasKey = geminiKey && geminiKey !== 'YOUR_GEMINI_API_KEY_HERE';
-  if (!hasKey) return null;
+  const hasKey = geminiKey || GEMINI_API_KEY || (typeof window !== 'undefined' && window.GEMINI_API_KEY) || (typeof localStorage !== 'undefined' && localStorage.getItem('GEMINI_API_KEY'));
+  if (!hasKey || hasKey === 'YOUR_GEMINI_API_KEY_HERE') return null;
 
   descBadge.textContent = '…';
   descBody.innerHTML = `<p class="manifest-empty desc-loading">Asking Gemini to describe the scene…</p>`;
 
-  // Resize to 768px for fast API response — Gemini doesn't need full res for captions
+  // Resize to 768px for fast API response
   const apiCanvas = resizeImage(resizedCanvas, 768);
   const base64    = apiCanvas.toDataURL('image/jpeg', 0.88).split(',')[1];
 
@@ -155,76 +195,66 @@ async function describeImage(resizedCanvas) {
         { inline_data: { mime_type: 'image/jpeg', data: base64 } }
       ]
     }],
-    generationConfig: { temperature: 0.4, maxOutputTokens: 600 }
+    generationConfig: { temperature: 0.4, maxOutputTokens: 1000 }
   };
 
-  const resp = await fetch(GEMINI_URL, {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify(payload)
-  });
-
-  if (!resp.ok) {
-    const txt = await resp.text();
-    let msg = txt.slice(0, 200);
-    try { const j = JSON.parse(txt); msg = j.error?.message || msg; } catch(_) {}
-    throw new Error(msg);
-  }
-
-  const data = await resp.json();
-  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  const text = await callGeminiApi(payload);
   if (!text) throw new Error('Empty response from Gemini.');
   return text.trim();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// HARDCODED COCO-SSD SHAPE CONFUSIONS — instant correction, no API needed
+// HARDCODED COCO-SSD SHAPE CONFUSIONS — instant correction lookup
 // ═══════════════════════════════════════════════════════════════════════════
-// COCO-SSD frequently misclassifies objects with similar shapes in neural features.
-// This lookup runs BEFORE Gemini to give an instant first-pass correction.
 const SHAPE_CONFUSION_HINT = {
-  // Flat + rectangular objects held in hand
-  'cell phone':    'mouse / remote / cell phone',
-  // Common webcam confusions
-  'remote':        'remote / mouse / cell phone',
-  'book':          'book / laptop / keyboard',
-  'laptop':        'laptop / book',
-  'vase':          'vase / bottle / cup',
-  'clock':         'clock / cell phone / remote',
-  'keyboard':      'keyboard / mouse / remote',
+  'cell phone': 'mouse / remote / cell phone',
+  'remote':     'remote / mouse / cell phone',
+  'book':       'book / laptop / keyboard',
+  'laptop':     'laptop / book',
+  'vase':       'bottle / cup / vase',
+  'cup':        'bottle / cup / mug',
+  'bowl':       'cup / bowl / plate',
+  'clock':      'clock / cell phone / remote',
+  'keyboard':   'keyboard / mouse / remote'
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// GEMINI LABEL VERIFICATION — corrects COCO-SSD misclassifications
+// GEMINI LABEL VERIFICATION & SMALL OBJECT DISCOVERY
+// Corrects misclassifications (e.g. vase -> bottle) and detects small objects (caps, pens, etc.)
 // ═══════════════════════════════════════════════════════════════════════════
 async function verifyDetectionsWithGemini(resizedCanvas, preds) {
-  const hasKey = geminiKey && geminiKey !== 'YOUR_GEMINI_API_KEY_HERE';
-  if (!hasKey || !preds.length) return preds;
+  const hasKey = geminiKey || GEMINI_API_KEY || (typeof window !== 'undefined' && window.GEMINI_API_KEY) || (typeof localStorage !== 'undefined' && localStorage.getItem('GEMINI_API_KEY'));
+  if (!hasKey || hasKey === 'YOUR_GEMINI_API_KEY_HERE') return preds;
 
-  const uniqueClasses = [...new Set(preds.map(p => p.class))];
+  const uniqueClasses = [...new Set((preds || []).map(p => p.class))];
 
-  // Build a context-aware hint for the model about what to look for
-  const hintLines = uniqueClasses
-    .filter(c => SHAPE_CONFUSION_HINT[c.toLowerCase()])
-    .map(c => `- COCO says "${c}" but it might actually be: ${SHAPE_CONFUSION_HINT[c.toLowerCase()]}`)
-    .join('\n');
+  const verifyPrompt = `You are a world-class AI vision and object detection system.
+The local COCO detector identified these candidate labels in this image: ${uniqueClasses.length ? uniqueClasses.join(', ') : 'none'}.
 
-  const verifyPrompt = `You are a precise object recognition assistant. The COCO-SSD model labeled these objects in the image: ${uniqueClasses.join(', ')}.
+Examine the image with extreme attention to detail:
+1. Verify if any detected labels are misclassified. Common confusion corrections:
+   - Water bottle, tumbler, flask, shaker, thermos (often labeled as "vase", "cup") -> correct to "bottle"
+   - Computer mouse (often labeled as "cell phone" or "remote") -> correct to "mouse"
+   - TV/AC remote (often labeled as "cell phone") -> correct to "remote"
+   - Mug or cup (often labeled as "bowl") -> correct to "cup"
+   - Book or notebook (often labeled as "laptop") -> correct to "book"
+2. Detect any small or missed objects in the scene that COCO missed (such as bottle cap, lid, pen, phone, watch, mouse, cup, glass, coins, keys, glasses).
+   For any missed object, provide its label and normalized bounding box [ymin, xmin, ymax, xmax] scaled 0 to 1000.
 
-${hintLines ? `COCO-SSD known confusion hints (use these to guide your analysis):\n${hintLines}` : ''}
+Return ONLY a JSON object adhering to this schema:
+{
+  "corrections": [
+    {"detected": "vase", "correct": "bottle"}
+  ],
+  "missed_objects": [
+    {"label": "bottle cap", "box": [ymin, xmin, ymax, xmax]}
+  ]
+}
+If no corrections or missed objects, return:
+{"corrections": [], "missed_objects": []}
+Do not include any explanation or markdown — raw JSON only.`;
 
-Look very carefully at EVERY labeled object in the image. Common mistakes to watch for:
-- Computer MOUSE (has a scroll wheel, wired/wireless, flat with buttons) → often wrongly labeled "cell phone"  
-- TV REMOTE (long thin plastic wand with buttons) → often wrongly labeled "cell phone"
-- KEYBOARD / MOUSE combo → often labeled as single "cell phone"
-- A BOTTLE → sometimes labeled "vase" or "cup"
-- A BOOK → sometimes labeled "laptop"
-
-Return ONLY a JSON array of corrections needed. Example: [{"detected": "cell phone", "correct": "mouse"}]
-If all labels are correct, return exactly: []
-No markdown, no explanation — just the raw JSON array.`;
-
-  const apiCanvas = resizeImage(resizedCanvas, 640);
+  const apiCanvas = resizeImage(resizedCanvas, 800);
   const base64 = apiCanvas.toDataURL('image/jpeg', 0.88).split(',')[1];
 
   const payload = {
@@ -233,46 +263,79 @@ No markdown, no explanation — just the raw JSON array.`;
       { inline_data: { mime_type: 'image/jpeg', data: base64 } }
     ]}],
     generationConfig: {
-      temperature: 0.05,
-      maxOutputTokens: 200,
+      temperature: 0.1,
+      maxOutputTokens: 1500,
       responseMimeType: 'application/json'
     }
   };
 
   try {
-    const resp = await fetch(GEMINI_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    if (!resp.ok) return preds;
+    let text = await callGeminiApi(payload);
+    if (!text) return preds;
 
-    const data = await resp.json();
-    let text = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+    if (text.startsWith('```')) {
+      text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+    }
 
-    // Parse JSON — handle both array and object wrapping
-    const jsonMatch = text.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) return preds;
+    let result = null;
+    try {
+      result = JSON.parse(text);
+    } catch (_) {
+      const fb = text.indexOf('{');
+      const lb = text.lastIndexOf('}');
+      if (fb !== -1 && lb !== -1) {
+        result = JSON.parse(text.slice(fb, lb + 1));
+      }
+    }
 
-    const corrections = JSON.parse(jsonMatch[0]);
-    if (!corrections.length) return preds;
+    if (!result) return preds;
 
     const corrMap = {};
-    corrections.forEach(c => { corrMap[c.detected.toLowerCase()] = c.correct; });
+    const corrections = result.corrections || (Array.isArray(result) ? result : []);
+    if (Array.isArray(corrections)) {
+      corrections.forEach(c => {
+        if (c.detected && c.correct) {
+          corrMap[c.detected.toLowerCase()] = c.correct;
+        }
+      });
+      Object.assign(geminiLabelOverrides, corrMap);
+    }
 
-    // Store overrides so every subsequent frame uses them without calling API again
-    Object.assign(geminiLabelOverrides, corrMap);
-
-    const corrected = preds.map(p => {
+    let corrected = (preds || []).map(p => {
       const fix = corrMap[p.class.toLowerCase()];
       return fix ? { ...p, class: fix, geminiCorrected: true } : p;
     });
 
-    const fixedLabels = corrections.map(c => `${c.detected} → ${c.correct}`).join(', ');
-    console.info(`[Gemini verify] Corrections applied: ${fixedLabels}`);
+    // Add missed small objects detected by Gemini
+    const missed = result.missed_objects || [];
+    if (Array.isArray(missed) && missed.length) {
+      const w = resizedCanvas.width;
+      const h = resizedCanvas.height;
+      for (const obj of missed) {
+        if (obj.box && Array.isArray(obj.box) && obj.box.length === 4) {
+          const [ymin, xmin, ymax, xmax] = obj.box;
+          const px = Math.round((xmin / 1000) * w);
+          const py = Math.round((ymin / 1000) * h);
+          const pw = Math.round(((xmax - xmin) / 1000) * w);
+          const ph = Math.round(((ymax - ymin) / 1000) * h);
+          if (pw > 4 && ph > 4) {
+            corrected.push({
+              class: obj.label || 'object',
+              score: 0.95,
+              bbox: [px, py, pw, ph],
+              geminiAdded: true
+            });
+          }
+        }
+      }
+    }
+
+    const fixedLabels = (corrections || []).map(c => `${c.detected} → ${c.correct}`).join(', ');
+    if (fixedLabels) console.info(`[Gemini verify] Corrections applied: ${fixedLabels}`);
+
     return corrected;
-  } catch(e) {
-    console.warn('Gemini verify failed:', e.message);
+  } catch (e) {
+    console.warn('[Gemini verify] failed:', e.message);
     return preds;
   }
 }
@@ -970,21 +1033,24 @@ function loadImage(event) {
     copyBtn.style.display = 'none';
 
     // ── Detection (always runs, no key needed) ────────────
-    let preds = await cocoModel.detect(rc, 50);   // up to 50 boxes
+    let preds = await cocoModel.detect(rc, 100);   // up to 100 boxes
     drawDetections(rc, preds, CONF_IMG);
     updateManifest(preds, 'COCO-SSD', CONF_IMG);
 
-    // ── Gemini label verification — corrects misclassifications ──
-    if (geminiKey) {
+    // ── Gemini label verification & small object enhancement ──
+    const hasKey = geminiKey || GEMINI_API_KEY || (typeof window !== 'undefined' && window.GEMINI_API_KEY) || (typeof localStorage !== 'undefined' && localStorage.getItem('GEMINI_API_KEY'));
+    if (hasKey && hasKey !== 'YOUR_GEMINI_API_KEY_HERE') {
       manifestBody.innerHTML += `<p class="manifest-empty" style="font-size:10px;margin-top:6px;color:var(--text-dim)">⟳ Verifying labels with Gemini…</p>`;
       try {
         const verified = await verifyDetectionsWithGemini(rc, preds);
-        if (verified !== preds) {
-          preds = verified;
-          drawDetections(rc, preds, CONF_IMG);
-          updateManifest(preds, 'COCO + GEMINI ✓', CONF_IMG);
-        }
-      } catch(e) { console.warn('Label verify skipped:', e.message); }
+        preds = verified;
+        drawDetections(rc, preds, CONF_IMG);
+        updateManifest(preds, 'COCO + GEMINI ✓', CONF_IMG);
+      } catch(e) {
+        console.warn('Label verify skipped:', e.message);
+        drawDetections(rc, preds, CONF_IMG);
+        updateManifest(preds, 'COCO-SSD', CONF_IMG);
+      }
     }
 
     // ── Scene description (needs Gemini key) ─────────────
