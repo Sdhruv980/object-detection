@@ -432,11 +432,16 @@ body {
 }
 
 #bill-results-body {
-  display: flex; flex-direction: column; gap: 14px;
-  max-height: 600px;
+  display: flex; flex-direction: column; gap: 16px;
+  max-height: 80vh;
   overflow-y: auto;
-  padding-right: 4px;
+  padding-right: 6px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(240,192,64,0.4) transparent;
 }
+#bill-results-body::-webkit-scrollbar { width: 5px; }
+#bill-results-body::-webkit-scrollbar-track { background: transparent; }
+#bill-results-body::-webkit-scrollbar-thumb { background: rgba(240,192,64,0.4); border-radius: 3px; }
 
 /* Progress bar */
 .bill-progress-bar {
@@ -456,7 +461,7 @@ body {
   background: #091729;
   border: 1px solid #234874;
   border-radius: var(--r);
-  overflow: hidden;
+  overflow: visible;
   transition: border-color .2s, box-shadow .2s;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
 }
@@ -470,6 +475,7 @@ body {
   background: rgba(240, 192, 64, 0.12);
   border-bottom: 1px solid rgba(240, 192, 64, 0.2);
   padding: 10px 14px; gap: 10px;
+  border-radius: var(--r) var(--r) 0 0;
 }
 .bill-card-num {
   font-family: var(--mono); font-size: 11px; font-weight: 700;
@@ -484,9 +490,16 @@ body {
 }
 
 .bill-card-body {
-  padding: 14px;
+  padding: 0 14px 14px 14px;
   display: flex; flex-direction: column; gap: 8px;
+  max-height: 380px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(56,189,248,0.4) transparent;
 }
+.bill-card-body::-webkit-scrollbar { width: 4px; }
+.bill-card-body::-webkit-scrollbar-track { background: transparent; }
+.bill-card-body::-webkit-scrollbar-thumb { background: rgba(56,189,248,0.4); border-radius: 3px; }
 
 /* Field row */
 .bill-field {

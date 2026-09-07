@@ -1058,9 +1058,9 @@ function renderBillCard(bill, container) {
        </div>`
     : '';
 
-  // Timeline display
+  // Timeline display — sits between header and scrollable body
   const timelineHtml = bill.timestamp !== undefined
-    ? `<div class="bill-timeline" style="background:rgba(56,189,248,0.1);border-left:3px solid #38bdf8;padding:8px 12px;margin:0 0 14px 0;font-size:11px;color:#94a3b8;border-radius:0 4px 4px 0">
+    ? `<div class="bill-timeline" style="background:rgba(56,189,248,0.08);border-bottom:1px solid rgba(56,189,248,0.2);border-left:3px solid #38bdf8;padding:7px 14px;font-size:11px;color:#94a3b8;flex-shrink:0">
          <span style="color:#38bdf8;font-weight:bold">⏱ TIMELINE:</span>
          This bill appears at <strong style="color:#f0c040">${bill.timestamp.toFixed(2)}s</strong> in the video
        </div>`
