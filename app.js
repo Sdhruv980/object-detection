@@ -14,12 +14,20 @@ const GEMINI_API_KEY = (typeof window !== 'undefined' && (window.GEMINI_API_KEY 
   : '';
 
 // ── Config ──────────────────────────────────────────────────────────────────
-const GEMINI_MODEL  = 'gemini-flash-latest';
+const GEMINI_MODEL  = 'gemini-3.7-flash';
 const GEMINI_URL    = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 const MAX_IMG_PX    = 1920;
 const CONF_IMG      = 0.08;   // lower threshold → detects small and low-contrast objects
-const CONF_VIDEO    = 0.12;   // lower threshold → catches phones, bottles, mouse, etc.
-const CONF_WEBCAM   = 0.10;   // even lower for live webcam (lighting varies)
+const CONF_VIDEO    = 0.25;   // balanced — reduces false-positive flicker in video
+const CONF_WEBCAM   = 0.20;   // slightly lower for live lighting variation
+
+// ── Video accuracy tuning ─────────────────────────────────────────────────────
+const VIDEO_MAX_BOXES     = 50;    // max detections per frame
+const SMOOTH_ALPHA        = 0.35;  // box position smoothing (0=frozen, 1=instant)
+const SMOOTH_SCORE_ALPHA  = 0.40;  // confidence score smoothing
+const SMOOTH_IOU_THRESH   = 0.40;  // min IoU to consider two boxes the same object
+const SMOOTH_MAX_MISS     = 6;     // frames an object can be missing before removed
+const DETECT_INTERVAL_MS  = 80;    // run model every ~80ms max (~12fps detect rate)
 
 const GEMINI_PROMPT = `You are an AI vision assistant. Analyse this image carefully and write a detailed description covering:
 - What objects, people, animals, or structures are present
@@ -43,6 +51,13 @@ let geminiInterval    = null;   // periodic Gemini refresh for video/webcam
 let isGeminiRunning   = false;  // prevent overlapping Gemini requests
 let geminiLabelOverrides = {};  // e.g. { 'cell phone': 'remote' } — updated every 15s
 let lastPreds         = [];     // most recent raw COCO-SSD predictions
+
+// ── Temporal smoothing state (video / webcam) ────────────────────────────────
+// Each tracked object: { id, class, score, bbox:[x,y,w,h], missCount, age }
+let trackedObjects    = [];     // smoothed object list across frames
+let trackIdCounter    = 0;      // incrementing unique ID for each tracked object
+let isDetectRunning   = false;  // prevent concurrent model.detect() calls
+let lastDetectTime    = 0;      // timestamp of last detect call
 
 // ── DOM refs ─────────────────────────────────────────────────────────────────
 const canvas        = document.getElementById('main-canvas');
@@ -306,9 +321,7 @@ Coordinates [ymin, xmin, ymax, xmax] must be normalized integers between 0 and 1
     ]}],
     generationConfig: {
       temperature: 0.1,
-      maxOutputTokens: 2500,
-      responseMimeType: 'application/json',
-      thinkingConfig: { thinkingBudget: 0 }
+      maxOutputTokens: 2500
     }
   };
 
@@ -698,8 +711,15 @@ async function loadBillVideo(event) {
   const results = await Promise.all(ocrPromises);
   progressBar.style.width = '90%';
 
+  // Store all keyframes for unrecognized bill tracking
+  billKeyframes = keyframes;
+
+  // Track which keyframes got successfully extracted
+  const extractedKeyframeIndices = new Set();
+
   // ── Step 3: Parse and Deduplicate Extracted Documents ───────────────
-  for (const { kf, res } of results) {
+  for (let i = 0; i < results.length; i++) {
+    const { kf, res } = results[i];
     if (!res) continue;
 
     // Check if document contains readable data
@@ -713,10 +733,39 @@ async function loadBillVideo(event) {
       res.frameData  = kf.dataUrl;
       allBills.push(res);
       renderBillCard(res, billBody);
+      extractedKeyframeIndices.add(i);
     }
   }
 
-  // ── Step 4: Finished ────────────────────────────────────────────────
+  // ── Step 4: Add Unrecognized Bills (keyframes with no valid OCR) ────
+  for (let i = 0; i < billKeyframes.length; i++) {
+    if (!extractedKeyframeIndices.has(i)) {
+      // This keyframe didn't produce any valid data
+      const unrecognizedBill = {
+        is_unrecognized: true,
+        bill_index: allBills.length + 1,
+        timestamp: billKeyframes[i].t,
+        frameData: billKeyframes[i].dataUrl,
+        doc_type: 'Unrecognized Label/Bill',
+        vendor_name: 'Not Recognized',
+        bill_number: null,
+        date: null,
+        customer_name: null,
+        customer_address: null,
+        items: [],
+        subtotal: null,
+        tax: null,
+        discount: null,
+        total: null,
+        payment_method: null,
+        notes: 'OCR could not extract data from this frame'
+      };
+      allBills.push(unrecognizedBill);
+      renderBillCard(unrecognizedBill, billBody);
+    }
+  }
+
+  // ── Step 5: Finished ────────────────────────────────────────────────
   billProgress.style.display = 'none';
   progressBar.style.width    = '100%';
   showVideoControls();
@@ -726,10 +775,22 @@ async function loadBillVideo(event) {
     billBody.innerHTML = `<p class="manifest-empty" style="color:#f87171">No bills/labels recognized in the video.${errDetail}</p>`;
   } else {
     flashDetectedHUD(allBills.length, allBills[0].vendor_name || allBills[0].bill_number);
+    
+    // Count recognized vs unrecognized
+    const recognizedCount = allBills.filter(b => !b.is_unrecognized).length;
+    const unrecognizedCount = allBills.filter(b => b.is_unrecognized).length;
+    
     const gt = computeGrandTotal(allBills);
-    billBody.insertAdjacentHTML('beforeend',
-      `<div class="bill-summary-row">
-         <span>📋 <strong>${allBills.length}</strong> bill${allBills.length > 1 ? 's' : ''} extracted</span>
+    const summaryHtml = `
+      <div class="bill-summary-row">
+        <span>📋 <strong>${recognizedCount}</strong> bill${recognizedCount !== 1 ? 's' : ''} extracted${unrecognizedCount > 0 ? `, <strong style="color:#f87171">${unrecognizedCount}</strong> unrecognized` : ''}</span>
+        ${gt ? `<span class="bill-grand-total">Grand Total: <strong>${gt}</strong></span>` : ''}
+      </div>`;
+    
+    billBody.insertAdjacentHTML('beforeend', summaryHtml);
+    exportRow.style.display = 'flex';
+  }
+} 's' : ''} extracted</span>
          ${gt ? `<span class="bill-grand-total">Grand Total: <strong>${gt}</strong></span>` : ''}
        </div>`);
     exportRow.style.display = 'flex';
@@ -815,15 +876,25 @@ function checkDuplicateBill(newBill, existingBills) {
   return false;
 }
 
-const FALLBACK_MODELS = ['gemini-flash-latest', 'gemini-3.7-flash', 'gemini-3.5-flash', 'gemini-flash-lite-latest'];
+const FALLBACK_MODELS = [
+  'gemini-3.7-flash',      // primary — Gemini 3.7 Flash, fast + accurate
+  'gemini-3.6-flash',      // fallback 1
+  'gemini-3.5-flash',      // fallback 2
+  'gemini-2.0-flash',      // fallback 3 — older but very stable
+  'gemini-1.5-flash'       // last resort — always available
+];
 
 async function analyzeBillFrame(dataUrl) {
   const key = GEMINI_API_KEY || (typeof window !== 'undefined' && window.GEMINI_API_KEY);
   if (!key || key === 'YOUR_GEMINI_API_KEY_HERE') {
-    throw new Error('Gemini API key is missing. Please set it in config.js or .env');
+    throw new Error('Gemini API key is missing. Please set it in config.js');
   }
 
   const base64Data = dataUrl.split(',')[1];
+
+  // NOTE: Do NOT use responseMimeType:"application/json" or thinkingConfig here —
+  // those fields cause HTTP 400 "invalid argument" on gemini-2.0-flash and 1.5-flash.
+  // We ask for JSON in the prompt and parse it manually instead.
   const payload = {
     contents: [{
       parts: [
@@ -832,57 +903,54 @@ async function analyzeBillFrame(dataUrl) {
       ]
     }],
     generationConfig: {
-      temperature: 0.1,
-      maxOutputTokens: 2500,
-      responseMimeType: "application/json",
-      thinkingConfig: { thinkingBudget: 0 }
+      temperature:     0.1,
+      maxOutputTokens: 2500
     }
   };
 
   let lastError = null;
 
-  // Try primary model, then automatically fallback if Google returns 503 / 429 high demand
   for (const modelName of FALLBACK_MODELS) {
     try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${key}`;
+      const url  = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${key}`;
       const resp = await fetch(url, {
-        method: 'POST',
+        method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body:    JSON.stringify(payload)
       });
 
       if (!resp.ok) {
         const errTxt = await resp.text();
         let msg = `HTTP ${resp.status}`;
-        try {
-          const j = JSON.parse(errTxt);
-          msg = j.error?.message || msg;
-        } catch (_) {}
-
-        console.warn(`[Gemini] ${modelName} returned: ${msg}. Trying fallback model...`);
+        try { const j = JSON.parse(errTxt); msg = j.error?.message || msg; } catch (_) {}
+        console.warn(`[Gemini] ${modelName} → ${msg}. Trying next model…`);
         lastError = new Error(msg);
-        await new Promise(r => setTimeout(r, 600)); // slight jitter before next model
+        await new Promise(r => setTimeout(r, 500));
         continue;
       }
 
       const data = await resp.json();
       let text = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
 
-      // Clean and parse JSON safely
+      // Strip markdown code fences if Gemini wraps the JSON
       if (text.startsWith('```')) {
-        text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+        text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
       }
 
+      // Extract the outermost JSON object
       const firstBrace = text.indexOf('{');
       const lastBrace  = text.lastIndexOf('}');
       if (firstBrace !== -1 && lastBrace !== -1) {
         text = text.slice(firstBrace, lastBrace + 1);
       }
 
-      return JSON.parse(text);
+      const parsed = JSON.parse(text);
+      console.log(`[Gemini] ${modelName} succeeded`);
+      return parsed;
+
     } catch (err) {
       lastError = err;
-      console.warn(`[Gemini] Attempt with ${modelName} failed:`, err.message);
+      console.warn(`[Gemini] ${modelName} failed:`, err.message);
     }
   }
 
@@ -975,13 +1043,29 @@ function renderBillCard(bill, container) {
        </div>`
     : '';
 
+  // Timeline display: show when the bill appears in the video
+  const timelineHtml = bill.timestamp !== undefined
+    ? `<div class="bill-timeline" style="background:rgba(56,189,248,0.1);border-left:3px solid #38bdf8;padding:8px 12px;margin:12px 0;font-size:11px;color:#94a3b8">
+         <span style="color:#38bdf8;font-weight:bold">⏱ TIMELINE:</span> 
+         This bill appears at <strong style="color:#f0c040">${bill.timestamp.toFixed(2)}s</strong> in the video
+       </div>`
+    : '';
+
+  // Mark unrecognized bills with warning badge
+  const isUnrecognized = bill.is_unrecognized || false;
+  const unrecognizedBadge = isUnrecognized
+    ? `<span style="background:#f87171;color:#000;padding:4px 8px;border-radius:4px;font-size:10px;font-weight:bold;margin-left:8px">⚠ NOT RECOGNIZED</span>`
+    : '';
+
   const cardHtml = `
-    <div class="bill-card" id="bill-card-${bill.bill_index}" onclick="inspectBillFrame(${bill.bill_index})" style="cursor:pointer" title="Click to view this frame on canvas">
+    <div class="bill-card ${isUnrecognized ? 'unrecognized' : ''}" id="bill-card-${bill.bill_index}" onclick="inspectBillFrame(${bill.bill_index})" style="cursor:pointer;${isUnrecognized ? 'border-color:#f87171;opacity:0.85;' : ''}" title="Click to view this frame on canvas">
       <div class="bill-card-header">
         <span class="bill-card-num">BILL #${bill.bill_index}</span>
-        <span class="bill-card-vendor">${bill.vendor_name || bill.doc_type || 'Document'}</span>
+        <span class="bill-card-vendor">${bill.vendor_name || bill.doc_type || 'Document'}${unrecognizedBadge}</span>
       </div>
+      ${timelineHtml}
       <div class="bill-card-body">
+        ${isUnrecognized ? '<div style="padding:12px;background:rgba(248,113,113,0.1);border-radius:6px;margin-bottom:12px;color:#f87171;font-size:11px;font-weight:600">⚠ No data extracted — OCR could not read this bill/label</div>' : ''}
         ${fld('Doc Type',   bill.doc_type)}
         ${fld('Bill / AWB', bill.bill_number, true)}
         ${fld('Date',       bill.date)}
@@ -993,10 +1077,10 @@ function renderBillCard(bill, container) {
         ${fld('Discount',   bill.discount)}
         ${fld('Payment',    bill.payment_method)}
         ${infoBox('Notes',  bill.notes)}
-        <div class="bill-total-row">
+        ${!isUnrecognized ? `<div class="bill-total-row">
           <span>TOTAL AMOUNT</span>
           <strong>${bill.total || '—'}</strong>
-        </div>
+        </div>` : ''}
       </div>
     </div>`;
 
@@ -1029,6 +1113,9 @@ function inspectBillFrame(billIndex) {
 function computeGrandTotal(bills) {
   let sum = 0, cur = '';
   for (const b of bills) {
+    // Skip unrecognized bills in total calculation
+    if (b.is_unrecognized) continue;
+    
     const m = String(b.total || '').match(/([₹$€£]?)([0-9,.]+)/);
     if (m) {
       if (!cur && m[1]) cur = m[1];
@@ -1258,6 +1345,7 @@ function loadVideo(event) {
   if (!file) return;
   if (!cocoModel) { alert('Model still loading, please wait.'); return; }
   stopDetection();
+  resetTracking();   // clear any tracked objects from previous video
   const url = URL.createObjectURL(file);
   vidSrc.src=url; vidSrc.muted=false; vidSrc.style.display='none'; vidSrc.load();
   iconVol.style.display='block'; iconMuted.style.display='none';
@@ -1282,15 +1370,167 @@ function applyLabelOverrides(preds) {
   });
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// TEMPORAL SMOOTHING ENGINE
+// Tracks objects across frames using IoU matching.
+// Smooths bounding box positions and confidence scores over time.
+// Removes objects that disappear for more than SMOOTH_MAX_MISS frames.
+// Result: stable, jitter-free boxes that stay locked onto moving objects.
+// ═══════════════════════════════════════════════════════════════════════════
+
+function boxIoU(a, b) {
+  // a, b = [x, y, w, h]
+  const ax2 = a[0] + a[2], ay2 = a[1] + a[3];
+  const bx2 = b[0] + b[2], by2 = b[1] + b[3];
+  const ix  = Math.max(0, Math.min(ax2, bx2) - Math.max(a[0], b[0]));
+  const iy  = Math.max(0, Math.min(ay2, by2) - Math.max(a[1], b[1]));
+  const inter = ix * iy;
+  if (inter === 0) return 0;
+  return inter / (a[2]*a[3] + b[2]*b[3] - inter);
+}
+
+function lerpBox(old, cur, alpha) {
+  return [
+    old[0] + (cur[0] - old[0]) * alpha,
+    old[1] + (cur[1] - old[1]) * alpha,
+    old[2] + (cur[2] - old[2]) * alpha,
+    old[3] + (cur[3] - old[3]) * alpha
+  ];
+}
+
+function updateTrackedObjects(newPreds) {
+  // Mark all existing tracks as unmatched
+  const matched = new Set();
+
+  // Match each new detection to the closest existing tracked object
+  for (const pred of newPreds) {
+    if (pred.score < CONF_VIDEO) continue;
+
+    let bestIdx   = -1;
+    let bestIoU   = SMOOTH_IOU_THRESH;
+
+    for (let i = 0; i < trackedObjects.length; i++) {
+      if (matched.has(i)) continue;
+      if (trackedObjects[i].class !== pred.class) continue;
+      const iou = boxIoU(trackedObjects[i].bbox, pred.bbox);
+      if (iou > bestIoU) { bestIoU = iou; bestIdx = i; }
+    }
+
+    if (bestIdx >= 0) {
+      // Update existing track — smooth position and score
+      const t = trackedObjects[bestIdx];
+      t.bbox      = lerpBox(t.bbox, pred.bbox, SMOOTH_ALPHA);
+      t.score     = t.score + (pred.score - t.score) * SMOOTH_SCORE_ALPHA;
+      t.missCount = 0;
+      t.age++;
+      matched.add(bestIdx);
+    } else {
+      // New object — create fresh track
+      trackedObjects.push({
+        id:        ++trackIdCounter,
+        class:     pred.class,
+        score:     pred.score,
+        bbox:      [...pred.bbox],
+        missCount: 0,
+        age:       1
+      });
+    }
+  }
+
+  // Age out unmatched tracks
+  for (let i = trackedObjects.length - 1; i >= 0; i--) {
+    if (!matched.has(i)) {
+      trackedObjects[i].missCount++;
+      if (trackedObjects[i].missCount > SMOOTH_MAX_MISS) {
+        trackedObjects.splice(i, 1);
+      }
+    }
+  }
+
+  return trackedObjects;
+}
+
+function resetTracking() {
+  trackedObjects  = [];
+  trackIdCounter  = 0;
+  isDetectRunning = false;
+  lastDetectTime  = 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VIDEO DETECTION LOOP  (throttled async — no rAF queue buildup)
+// Instead of requestAnimationFrame which fires every 16ms and queues faster
+// than the model can respond, we use a self-scheduling async loop that waits
+// for each detect() call to finish before scheduling the next frame.
+// ═══════════════════════════════════════════════════════════════════════════
 async function detectVideoFrame() {
   if (!isDetecting || vidSrc.paused || vidSrc.ended) return;
-  const raw   = await cocoModel.detect(vidSrc, 30);
-  lastPreds   = raw;
-  const preds = applyLabelOverrides(raw);
+
+  const now = performance.now();
+  const elapsed = now - lastDetectTime;
+
+  // Throttle: if less than DETECT_INTERVAL_MS since last detect, draw current
+  // tracked objects without running the model again (saves CPU, keeps display smooth)
+  if (elapsed < DETECT_INTERVAL_MS || isDetectRunning) {
+    // Draw current smoothed boxes without re-detecting
+    drawSmoothedBoxes();
+    animFrameId = requestAnimationFrame(detectVideoFrame);
+    return;
+  }
+
+  isDetectRunning = true;
+  lastDetectTime  = now;
+
+  // Snapshot current video frame to offscreen canvas — prevents tearing
+  // when the video advances while we're still drawing
+  const offscreen = document.createElement('canvas');
+  offscreen.width  = canvas.width;
+  offscreen.height = canvas.height;
+  offscreen.getContext('2d').drawImage(vidSrc, 0, 0, canvas.width, canvas.height);
+
+  try {
+    const raw   = await cocoModel.detect(offscreen, VIDEO_MAX_BOXES);
+    lastPreds   = raw;
+    const fixed = applyLabelOverrides(raw);
+    updateTrackedObjects(fixed);
+  } catch(e) {
+    console.warn('detect error:', e.message);
+  }
+
+  isDetectRunning = false;
+
+  // Draw the offscreen snapshot with current smoothed boxes on top
+  ctx.drawImage(offscreen, 0, 0);
+  drawSmoothedBoxes();
+
   const engine = Object.keys(geminiLabelOverrides).length ? 'COCO + GEMINI ✓' : 'COCO-SSD';
-  drawDetections(vidSrc, preds, CONF_VIDEO);
-  updateManifest(preds, engine, CONF_VIDEO);
+  updateManifest(trackedObjects, engine, CONF_VIDEO);
+
   animFrameId = requestAnimationFrame(detectVideoFrame);
+}
+
+function drawSmoothedBoxes() {
+  trackedObjects.forEach(t => {
+    if (t.score < CONF_VIDEO) return;
+    // Fade boxes that are going stale (missed frames)
+    const alpha = t.missCount > 0 ? Math.max(0.3, 1 - t.missCount / SMOOTH_MAX_MISS) : 1;
+    const [x, y, w, h] = t.bbox;
+    const color = colorFor(t.class);
+    const label = t.class.toUpperCase() + '  ' + (t.score * 100).toFixed(0) + '%';
+
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = color; ctx.lineWidth = 2.5;
+    ctx.strokeRect(x, y, w, h);
+
+    ctx.font = 'bold 12px "Courier New"';
+    const tw = ctx.measureText(label).width + 14;
+    const ly = y > 26 ? y - 24 : y + 2;
+    ctx.fillStyle = color;
+    ctx.fillRect(x, ly, tw, 22);
+    ctx.fillStyle = '#000';
+    ctx.fillText(label, x + 7, ly + 15);
+    ctx.globalAlpha = 1;
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1299,6 +1539,7 @@ async function detectVideoFrame() {
 async function startWebcam() {
   if (!cocoModel) { alert('Model still loading.'); return; }
   stopDetection();
+  resetTracking();   // clear tracked objects from any previous session
   try {
     webcamStream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
@@ -1329,41 +1570,41 @@ async function startWebcam() {
 async function detectWebcamFrame() {
   if (!isDetecting) return;
 
-  // Always draw the live webcam frame first so canvas is never stale
+  const now     = performance.now();
+  const elapsed = now - lastDetectTime;
+
+  // Always draw the live frame so canvas never freezes
   if (vidSrc.readyState >= 2) {
     ctx.drawImage(vidSrc, 0, 0, canvas.width, canvas.height);
   }
 
-  // Run COCO-SSD on the live video element
-  let raw = [];
-  try {
-    raw = await cocoModel.detect(vidSrc, 30);
-  } catch (e) {
-    console.warn('COCO detect error:', e.message);
+  if (elapsed >= DETECT_INTERVAL_MS && !isDetectRunning) {
+    isDetectRunning = true;
+    lastDetectTime  = now;
+
+    // Snapshot to offscreen so detection is on a frozen frame (no mid-inference tearing)
+    const offscreen = document.createElement('canvas');
+    offscreen.width  = canvas.width;
+    offscreen.height = canvas.height;
+    offscreen.getContext('2d').drawImage(vidSrc, 0, 0, canvas.width, canvas.height);
+
+    try {
+      const raw  = await cocoModel.detect(offscreen, VIDEO_MAX_BOXES);
+      lastPreds  = raw;
+      const fixed = applyLabelOverrides(raw);
+      updateTrackedObjects(fixed);
+    } catch(e) {
+      console.warn('webcam detect error:', e.message);
+    }
+
+    isDetectRunning = false;
   }
-  lastPreds = raw;
-  const preds  = applyLabelOverrides(raw);
+
+  // Draw smoothed boxes on top of live frame
   const engine = Object.keys(geminiLabelOverrides).length ? 'COCO + GEMINI ✓' : 'COCO-SSD';
+  drawSmoothedBoxes();
+  updateManifest(trackedObjects, engine, CONF_WEBCAM);
 
-  // Draw bounding boxes on top of the already-drawn live frame
-  const thr = CONF_WEBCAM;
-  preds.forEach(p => {
-    if (p.score < thr) return;
-    const [x, y, w, h] = p.bbox;
-    const color = colorFor(p.class);
-    const label = p.class.toUpperCase() + '  ' + (p.score * 100).toFixed(0) + '%';
-    ctx.strokeStyle = color; ctx.lineWidth = 2.5;
-    ctx.strokeRect(x, y, w, h);
-    ctx.font = 'bold 12px "Courier New"';
-    const tw = ctx.measureText(label).width + 14;
-    const ly = y > 26 ? y - 24 : y + 2;
-    ctx.fillStyle = color;
-    ctx.fillRect(x, ly, tw, 22);
-    ctx.fillStyle = '#000';
-    ctx.fillText(label, x + 7, ly + 15);
-  });
-
-  updateManifest(preds, engine, CONF_WEBCAM);
   animFrameId = requestAnimationFrame(detectWebcamFrame);
 }
 
@@ -1371,9 +1612,11 @@ async function detectWebcamFrame() {
 // STOP
 // ═══════════════════════════════════════════════════════════════════════════
 function stopDetection() {
-  isDetecting = false;
+  isDetecting     = false;
+  isDetectRunning = false;
   if (animFrameId) { cancelAnimationFrame(animFrameId); animFrameId = null; }
   if (geminiInterval) { clearInterval(geminiInterval); geminiInterval = null; }
+  resetTracking();
 
   if (webcamStream) {
     webcamStream.getTracks().forEach(t => t.stop());

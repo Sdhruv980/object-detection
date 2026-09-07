@@ -1,0 +1,501 @@
+================================================================================
+  OBJECT DETECTION LAB — COMPLETE TECH STACK REFERENCE
+  Project: d:\object detection\
+  Last Updated: August 2026
+================================================================================
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  PROJECT OVERVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  A dual-layer object detection system with a browser-based frontend and a
+  Python command-line backend. Detects objects in images, videos, and live
+  webcam feeds. Includes AI scene description, label verification, a bill/
+  invoice scanner, and drag-and-drop image upload.
+
+  Two completely independent pipelines exist side by side:
+
+    [A] Browser Frontend  →  index.html + app.js + style.css
+    [B] Python Backend    →  detect.py + requirements.txt
+
+
+================================================================================
+  SECTION 1 — PROGRAMMING LANGUAGES
+================================================================================
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  Language         Used In              Purpose                          │
+  ├─────────────────────────────────────────────────────────────────────────┤
+  │  JavaScript (ES6) app.js               All frontend logic, detection,   │
+  │   · 'use strict'  (browser)             API calls, DOM manipulation,    │
+  │   · async/await                         canvas drawing, video controls  │
+  │   · Fetch API                                                            │
+  │                                                                          │
+  │  Python 3.9+      detect.py            CLI detection runner, model      │
+  │   · argparse      (command-line)        loading, frame processing,       │
+  │   · asyncio                             webcam feed, file I/O            │
+  │                                                                          │
+  │  HTML5            index.html           Page structure, semantic layout,  │
+  │                                         canvas element, video element,   │
+  │                                         drag-and-drop zone               │
+  │                                                                          │
+  │  CSS3             style.css            Styling, grid layout, animations, │
+  │   · CSS Variables                       responsive design, dark theme,   │
+  │   · CSS Grid                            component styles                 │
+  │   · CSS Animations                                                       │
+  │                                                                          │
+  │  PowerShell       setup_env.ps1        Windows environment setup         │
+  │                   (Windows only)        automation script                │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+
+================================================================================
+  SECTION 2 — AI MODELS
+================================================================================
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  Model               Type              Used In     Classes/Capability   │
+  ├─────────────────────────────────────────────────────────────────────────┤
+  │                                                                          │
+  │  COCO-SSD            Object Detection  Browser     80 classes           │
+  │  (MobileNet V2 base) (in-browser)      (TF.js)     person, car, chair,  │
+  │                                                     dog, bottle, laptop, │
+  │                                                     phone, cup, etc.     │
+  │                                                                          │
+  │  COCO-SSD Lite       Object Detection  Browser     80 classes (faster,  │
+  │  (lite_mobilenet_v2) Fallback          (TF.js)     used for webcam)     │
+  │                                                                          │
+  │  Gemini 2.0 Flash    Multimodal LLM    Browser     Open-vocabulary:     │
+  │  (Google)            Vision + Text     (API)        scene description,   │
+  │                                                     label verification,  │
+  │                                                     bill/invoice OCR,    │
+  │                                                     structured JSON data │
+  │                                                                          │
+  │  Gemini Flash        Fallback chain    Browser     Same as above;       │
+  │  Latest / 3.7 / 3.5  (auto-fallback)   (API)       tried in sequence    │
+  │  / Flash Lite                                       on API failure       │
+  │                                                                          │
+  │  YOLO (Ultralytics)  Object Detection  Python CLI  80+ classes          │
+  │  yolo26s / n / m     Real-time         detect.py   (model weights        │
+  │  / l / x variants   detection                       downloaded auto)     │
+  │                                                                          │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+
+================================================================================
+  SECTION 3 — FRAMEWORKS & LIBRARIES
+================================================================================
+
+  ── FRONTEND (Browser) ──────────────────────────────────────────────────────
+
+  TensorFlow.js v4.17.0
+    · CDN: cdn.jsdelivr.net/npm/@tensorflow/tfjs
+    · Used for running COCO-SSD entirely in-browser (no server needed)
+    · Handles tensor operations, model inference, GPU acceleration via WebGL
+    · URL: https://www.tensorflow.org/js
+
+  COCO-SSD v2.2.3 (TF.js model)
+    · CDN: cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd
+    · Pre-trained object detection model — runs on CPU or WebGL in browser
+    · Returns: [{ class, score, bbox: [x, y, width, height] }]
+    · URL: https://github.com/tensorflow/tfjs-models/tree/master/coco-ssd
+
+  Google Gemini API (v1beta)
+    · Endpoint: generativelanguage.googleapis.com/v1beta/models/
+    · Used for: scene description, label correction, bill OCR
+    · Request format: JSON with base64 inline image + text prompt
+    · Response: candidates[0].content.parts[0].text
+    · Free tier: 15 requests/min, 1500 requests/day
+    · URL: https://aistudio.google.com/app/apikey
+
+  ── BACKEND (Python CLI) ────────────────────────────────────────────────────
+
+  Ultralytics (>=8.3.100)
+    · YOLO model family — YOLOv8 through YOLO v2.6 variants
+    · Provides: model loading, inference, NMS, result parsing
+    · Auto-downloads .pt weight files on first use
+    · URL: https://github.com/ultralytics/ultralytics
+
+  OpenCV (opencv-python-headless >=4.10.0)
+    · Image read/write, video capture, frame processing
+    · Drawing bounding boxes, labels, and overlays
+    · Real-time webcam access via cv2.VideoCapture
+    · URL: https://opencv.org
+
+  Pillow (>=10.0.0)
+    · Image format conversion and preprocessing
+    · Used internally by Ultralytics
+
+  python-dotenv (>=1.0.0)
+    · Loads GEMINI_API_KEY and YOLO_MODEL from .env file
+    · Keeps secrets out of source code
+
+  NumPy (>=1.24.0)
+    · Array operations for image/tensor processing
+    · Used internally by OpenCV and Ultralytics
+
+
+================================================================================
+  SECTION 4 — WEB TECHNOLOGIES & BROWSER APIs
+================================================================================
+
+  HTML5 Canvas API
+    · Used to draw video frames and detection bounding boxes
+    · canvas.getContext('2d') for 2D drawing operations
+    · Supports drawImage(), fillRect(), strokeRect(), fillText()
+
+  HTML5 Video Element
+    · Loads video files and webcam streams
+    · Used as input source for COCO-SSD model.detect()
+    · Supports: MP4, WebM, OGG formats
+
+  MediaDevices API (getUserMedia)
+    · Accesses webcam / device camera in real-time
+    · Requests video stream: { facingMode: 'environment', width: 1280 }
+
+  requestAnimationFrame
+    · Powers the real-time detection loop for video and webcam
+    · Syncs detection to display refresh rate (60fps target)
+
+  Fetch API
+    · Used for all Gemini API calls (POST with JSON body)
+    · Handles cold-start retry on 503 responses
+
+  Canvas Drag-and-Drop
+    · dragover / dragleave / drop events on canvas-wrap
+    · DataTransfer.files[0] for dropped image files
+
+  File API / Object URLs
+    · URL.createObjectURL() for loading local images/videos
+    · FileReader for reading dropped files
+
+  localStorage API
+    · Persists Gemini API key across browser sessions
+    · Key stored as: localStorage.setItem('GEMINI_API_KEY', value)
+
+  Clipboard API
+    · navigator.clipboard.writeText() for "Copy text" button
+    · Copies AI scene description to system clipboard
+
+
+================================================================================
+  SECTION 5 — AI SYSTEM ARCHITECTURE
+================================================================================
+
+  ── Image Detection Pipeline ────────────────────────────────────────────────
+
+    User uploads image
+         │
+         ▼
+    Resize to max 1920px (preserves aspect ratio)
+         │
+         ▼
+    COCO-SSD detects up to 100 boxes (confidence ≥ 0.15)
+         │
+         ▼
+    IF Gemini key is set:
+      ├─ Gemini Vision API: verifyDetectionsWithGemini()
+      │     · Corrects misclassified labels (e.g. vase → bottle)
+      │     · Adds missed small objects (caps, pens, plants...)
+      │     · Returns structured JSON with corrections + new boxes
+      │     · Uses IoU (Intersection over Union) to avoid duplicates
+      │
+      └─ Gemini Vision API: describeImage()
+            · Sends 768px JPEG as base64 inline_data
+            · Returns multi-paragraph natural language description
+    │
+    ▼
+    Draw all boxes on canvas with color-coded labels
+    Update Detection Manifest panel (right side)
+    Show AI Scene Description panel (right side)
+
+  ── Video Detection Pipeline ────────────────────────────────────────────────
+
+    User loads video file
+         │
+         ▼
+    resetTracking() — clears any previous tracked objects
+         │
+         ▼
+    Async throttled detect loop (replaces naive rAF+async pattern):
+         │
+         │  Every animation frame:
+         │  ├─ If elapsed < 80ms OR detect already running:
+         │  │    Draw current smoothed boxes without model call (display stays smooth)
+         │  │
+         │  └─ If elapsed ≥ 80ms AND model is free:
+         │       ├─ Snapshot video frame → offscreen canvas (prevents tearing)
+         │       ├─ COCO-SSD detects up to 50 boxes (conf ≥ 0.25)
+         │       ├─ applyLabelOverrides() — apply Gemini corrections
+         │       └─ updateTrackedObjects() — temporal smoothing engine (see below)
+         │
+         └─ drawSmoothedBoxes() — render stabilized boxes with fade-out on miss
+
+    Parallel Gemini interval (every 8 seconds):
+         ├─ refreshLabelVerification() — updates label correction cache
+         └─ refreshDescription() — updates scene description (every 16s)
+
+    ── Temporal Smoothing Engine ──────────────────────────────────────────
+
+    Problem it solves: Without smoothing, boxes flicker every frame because
+    each detection is independent — the model gives slightly different box
+    coordinates on every frame even for the same still object.
+
+    Algorithm (updateTrackedObjects):
+      1. For each new detection, find the existing tracked object with the
+         highest IoU overlap of the same class (threshold: IoU > 0.40)
+      2. If match found: lerp (linear interpolate) the box position toward
+         new detection by alpha=0.35, lerp score by alpha=0.40
+         → boxes glide smoothly to new position rather than jumping
+      3. If no match: create new tracked object with a unique ID
+      4. Unmatched existing objects: increment missCount
+         → After 6 missed frames, remove from tracked list
+         → While fading: box opacity reduces (globalAlpha fade-out effect)
+
+    Result: Boxes lock onto objects and follow them smoothly. Objects that
+    briefly disappear from detection stay visible for up to 6 frames before
+    being removed — eliminates flicker from occasional missed detections.
+
+    Key parameters:
+      SMOOTH_ALPHA       = 0.35   Box position lerp speed
+      SMOOTH_SCORE_ALPHA = 0.40   Confidence score lerp speed
+      SMOOTH_IOU_THRESH  = 0.40   Min overlap to match same object
+      SMOOTH_MAX_MISS    = 6      Frames before object is removed
+      DETECT_INTERVAL_MS = 80ms   Max model call rate (~12 FPS detect)
+
+  ── Webcam Detection Pipeline ───────────────────────────────────────────────
+
+    getUserMedia() → video stream
+         │
+         ▼
+    resetTracking() — clears previous tracked objects
+         │
+         ▼
+    Async throttled loop (same engine as video):
+         ├─ Draw live webcam frame every rAF tick (canvas never freezes)
+         ├─ If elapsed ≥ 80ms AND model free:
+         │    Snapshot → offscreen canvas → COCO-SSD detect (conf ≥ 0.20)
+         │    → updateTrackedObjects() temporal smoothing
+         └─ drawSmoothedBoxes() on top of live frame
+
+    Background Gemini interval: same as Video pipeline (8s / 16s cycle)
+
+  ── Bill Scanner Pipeline ───────────────────────────────────────────────────
+
+    User loads video containing bills/invoices
+         │
+         ▼
+    fastExtractKeyframes() — 2 to 4 keyframes based on video duration
+         │    · Short (<6s):  2 frames at 30%, 75%
+         │    · Medium (<18s): 3 frames at 20%, 50%, 80%
+         │    · Long (>18s):  4 frames at 15%, 40%, 65%, 88%
+         ▼
+    Parallel Gemini OCR on all keyframes simultaneously
+         │    · BILL_PROMPT requests structured JSON extraction
+         │    · Extracts: vendor, bill_number, items, total, address...
+         │    · Fallback model chain: gemini-flash-latest → 3.7 → 3.5 → lite
+         ▼
+    Deduplication check (by bill_number / AWB + vendor + total)
+         │
+         ▼
+    Render formatted bill cards with all extracted fields
+    Export as JSON or CSV
+
+  ── Gemini Label Override System ────────────────────────────────────────────
+
+    Running in background during video/webcam:
+    · Gemini scans current frame, returns { corrections: [...] }
+    · Corrections are cached in geminiLabelOverrides map
+    · Every future COCO-SSD prediction passes through applyLabelOverrides()
+    · No re-running Gemini for every frame — corrections applied instantly
+
+
+================================================================================
+  SECTION 6 — DETECTION METHODS & TECHNIQUES
+================================================================================
+
+  Object Detection
+    · Algorithm : Single Shot MultiBox Detector (SSD)
+    · Backbone  : MobileNet V2 / Lite MobileNet V2
+    · Anchors   : Multi-scale feature maps
+    · NMS       : Non-Maximum Suppression (built into COCO-SSD)
+    · Threshold : Configurable per mode (CONF_IMG / CONF_VIDEO / CONF_WEBCAM)
+
+  Temporal Smoothing (Video & Webcam — NEW)
+    · Method    : IoU-based object tracking + linear interpolation (lerp)
+    · Matching  : Hungarian-style greedy IoU match per class per frame
+    · Position  : Lerp alpha 0.35 — boxes glide to new position smoothly
+    · Score     : Lerp alpha 0.40 — confidence score stabilised over time
+    · Miss      : Objects kept for 6 missed frames (fade-out effect)
+    · Result    : Eliminates box flicker, boxes lock onto moving objects
+
+  Async Throttled Detect Loop (Video & Webcam — NEW)
+    · Max detect rate : ~12 FPS (80ms minimum between model calls)
+    · Display rate    : 60 FPS (rAF draws smoothed boxes every frame)
+    · Prevents        : Queue buildup from rAF firing faster than model
+    · Offscreen snap  : Frame frozen to canvas before detect (no tearing)
+
+  Bounding Box Format
+    · COCO-SSD output : [x, y, width, height] in pixel coordinates
+    · Gemini output   : [ymin, xmin, ymax, xmax] normalized 0–1000
+    · Internal format : [x, y, w, h] in canvas pixel space
+
+  IoU (Intersection over Union)
+    · Used in verifyDetectionsWithGemini() — deduplicate Gemini + COCO boxes
+    · Used in updateTrackedObjects() — match new detections to tracked objects
+    · IoU > 0.45 for Gemini dedup; IoU > 0.40 for temporal tracking
+    · Standard metric for box overlap in object detection
+
+  Confidence Thresholds
+    · Images  : 0.08  (very low — catches small and low-contrast objects)
+    · Video   : 0.25  (balanced — reduces false-positive flicker)
+    · Webcam  : 0.20  (slightly lower — compensates for variable lighting)
+
+  Color-Coded Labels
+    · Each class gets a stable color from a 22-color palette
+    · Colors assigned on first detection, then cached in colorMap{}
+    · Same class always shows the same color across all frames
+    · Fading boxes (missed frames) rendered with reduced globalAlpha
+
+
+================================================================================
+  SECTION 7 — FILE STRUCTURE
+================================================================================
+
+  d:\object detection\
+  │
+  ├── index.html          HTML5 frontend — page structure and layout
+  ├── app.js              JavaScript — all detection, API, and UI logic
+  ├── style.css           CSS3 — full dark theme, responsive layout
+  ├── config.js           API key config (loaded at runtime, not in repo)
+  │
+  ├── detect.py           Python CLI — YOLO-based detection for
+  │                        image / video / webcam via command line
+  ├── requirements.txt    Python dependencies (pip install -r)
+  ├── setup_env.ps1       PowerShell script — creates venv, installs deps
+  │
+  ├── inputs\             Drop source images/videos here for detect.py
+  ├── outputs\            Annotated results saved here by detect.py
+  ├── models\             Optional: place custom .pt weight files here
+  │
+  ├── .env                Secrets file — GEMINI_API_KEY, YOLO_MODEL
+  │                        (never commit this to git)
+  └── TECH_STACK.txt      This document
+
+================================================================================
+  SECTION 8 — EXTERNAL SERVICES & APIS
+================================================================================
+
+  Google Gemini API
+    · Provider    : Google AI / Google DeepMind
+    · Models used : gemini-3.7-flash (primary),
+                    gemini-3.6-flash, gemini-3.5-flash,
+                    gemini-2.0-flash, gemini-1.5-flash (fallback chain)
+    · Protocol    : HTTPS REST, POST JSON
+    · Auth        : API Key (query param ?key=)
+    · Free tier   : 15 requests/min, 1500/day
+    · Get key     : https://aistudio.google.com/app/apikey
+    · Base URL    : https://generativelanguage.googleapis.com/v1beta/models/
+    · IMPORTANT   : Do NOT use responseMimeType or thinkingConfig in
+                    generationConfig — these cause HTTP 400 on flash models
+
+  TensorFlow.js CDN (jsDelivr)
+    · Provider    : jsDelivr CDN
+    · Package     : @tensorflow/tfjs@4.17.0
+    · URL         : https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js
+
+  COCO-SSD CDN (jsDelivr)
+    · Provider    : jsDelivr CDN
+    · Package     : @tensorflow-models/coco-ssd@2.2.3
+    · URL         : https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js
+
+  Ultralytics YOLO (Python)
+    · Provider    : Ultralytics
+    · Model files : Auto-downloaded from ultralytics servers on first use
+    · Formats     : .pt (PyTorch weights)
+
+
+================================================================================
+  SECTION 9 — DESIGN SYSTEM
+================================================================================
+
+  Theme       : Dark navy — inspired by terminal/lab interfaces
+  Font Stack  : Sans — system-ui, Segoe UI, Roboto
+                Mono — SFMono-Regular, Consolas, Courier New
+
+  Color Palette:
+    Background     #0b1929    Deep navy
+    Card BG        #0e2240    Dark blue panel
+    Accent         #e05a1e    Orange (primary action, active states)
+    Teal           #38bdf8    Info, badges, labels
+    Yellow         #f0c040    Bills, warnings, time display
+    Green          #34d399    Success, active Gemini
+    Text           #e2e8f0    Primary text
+    Text Dim       #94a3b8    Secondary / muted text
+    Grid           rgba(30,74,122,0.32)  Background grid lines
+
+  Layout:
+    Max width      : 1440px (wrapper)
+    Right panel    : 420px fixed width
+    Canvas         : fluid, max-height 75vh
+    Grid lines     : 48×48px background pattern (CSS background-image)
+    Border radius  : 8px (cards, panels)
+
+  Animation:
+    · Pulsing dot on model badge (2s ease-in-out)
+    · Chip fade-in on label add
+    · Manifest item slide-in
+    · BLIP/Gemini loading blink
+
+
+================================================================================
+  SECTION 10 — PYTHON BACKEND SPECIFICS
+================================================================================
+
+  Runtime        : Python 3.9+
+  Entry point    : detect.py
+  CLI Framework  : argparse (standard library)
+
+  Modes:
+    --mode image   Run detection on a single image file, save annotated output
+    --mode video   Process every frame of a video, save annotated MP4
+    --mode webcam  Live webcam feed with real-time bounding boxes
+
+  YOLO Model Options (--model flag):
+    yolo26n.pt    Nano    — fastest, lowest accuracy
+    yolo26s.pt    Small   — fast, good accuracy         ← default
+    yolo26m.pt    Medium  — balanced
+    yolo26l.pt    Large   — high accuracy, slower
+    yolo26x.pt    XLarge  — highest accuracy, slowest
+
+  Environment Variables (.env):
+    GEMINI_API_KEY   Your Google Gemini API key
+    YOLO_MODEL       Default model name (e.g. yolo26s.pt)
+
+  Virtual Environment Setup (Windows):
+    .\setup_env.ps1         → creates venv/, installs all requirements
+    .\venv\Scripts\Activate.ps1  → activate before running detect.py
+
+
+================================================================================
+  SECTION 11 — QUICK COMMAND REFERENCE
+================================================================================
+
+  BROWSER (open in any modern browser — no server needed):
+    Open d:\object detection\index.html directly in browser
+
+  PYTHON CLI (activate venv first):
+    python detect.py --mode image  --source inputs/photo.jpg
+    python detect.py --mode video  --source inputs/clip.mp4
+    python detect.py --mode webcam
+    python detect.py --mode image  --source inputs/photo.jpg --model yolo26m.pt --conf 0.3
+
+  SETUP (run once):
+    .\setup_env.ps1
+    .\venv\Scripts\Activate.ps1
+
+
+================================================================================
+  END OF TECH STACK DOCUMENT
+================================================================================
