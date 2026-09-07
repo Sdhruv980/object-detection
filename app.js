@@ -694,7 +694,7 @@ async function loadBillVideo(event) {
   progressTxt.textContent = `⟳ Extracting keyframes from ${duration.toFixed(1)}s video…`;
   progressBar.style.width = '20%';
 
-  // ── Step 1: Fast Keyframe Extraction (0.5s) ──
+  // ── Step 1: Dense Keyframe Extraction (1 frame / 1.5s) ──────────────
   const keyframes = await fastExtractKeyframes(vidSrc, duration, (pct) => {
     progressBar.style.width = (20 + pct * 30) + '%';
   });
@@ -707,7 +707,7 @@ async function loadBillVideo(event) {
   }
 
   progressBar.style.width = '55%';
-  progressTxt.textContent = `⚡ Running fast parallel OCR on ${keyframes.length} keyframe(s) with Gemini 3.7 Flash…`;
+  progressTxt.textContent = `⚡ Running parallel OCR on ${keyframes.length} keyframe(s) with Gemini Flash…`;
 
   // Draw the clearest frame to canvas
   const previewImg = new Image();
@@ -715,19 +715,32 @@ async function loadBillVideo(event) {
   ctx.drawImage(previewImg, 0, 0, canvas.width, canvas.height);
   drawScanHUD(keyframes[0].t, duration, 1, keyframes.length, 0);
 
-  // ── Step 2: Parallel Gemini OCR (1.5 - 2.5s total) ───────────────────
+  // ── Step 2: Batched Gemini OCR (5 frames at a time to respect rate limits) ──
   let lastError = null;
-  const ocrPromises = keyframes.map(async (kf, idx) => {
-    try {
-      const res = await analyzeBillFrame(kf.dataUrl);
-      return { kf, res };
-    } catch (err) {
-      lastError = err.message;
-      return { kf, res: null };
-    }
-  });
+  const results = [];
+  const BATCH = 5;
 
-  const results = await Promise.all(ocrPromises);
+  for (let i = 0; i < keyframes.length; i += BATCH) {
+    const batch = keyframes.slice(i, i + BATCH);
+    progressTxt.textContent = `⚡ OCR: processing frames ${i + 1}–${Math.min(i + BATCH, keyframes.length)} of ${keyframes.length}…`;
+    progressBar.style.width = (55 + ((i / keyframes.length) * 35)) + '%';
+
+    const batchResults = await Promise.all(batch.map(async (kf) => {
+      try {
+        const res = await analyzeBillFrame(kf.dataUrl);
+        return { kf, res };
+      } catch (err) {
+        lastError = err.message;
+        return { kf, res: null };
+      }
+    }));
+    results.push(...batchResults);
+
+    // Small pause between batches to avoid hitting Gemini rate limits
+    if (i + BATCH < keyframes.length) {
+      await new Promise(r => setTimeout(r, 300));
+    }
+  }
   progressBar.style.width = '90%';
 
   // Store all keyframes for unrecognized bill tracking
@@ -811,53 +824,86 @@ async function loadBillVideo(event) {
   }
 }
 
-// Fast Keyframe Extraction: Samples 2-4 optimal frames across video in milliseconds
+// Keyframe Extraction — samples every ~1.5s and skips near-duplicate frames
+// For a 32s video this gives ~20 candidates, then deduplication cuts repeats
 async function fastExtractKeyframes(vid, duration, onProgress) {
-  const capCanvas = document.createElement('canvas');
-  const capCtx    = capCanvas.getContext('2d');
-  
-  // Fast downscaled resolution for OCR: max 850px for instant transfer & razor-sharp text
+  const capCanvas  = document.createElement('canvas');
+  const capCtx     = capCanvas.getContext('2d');
+  const diffCanvas = document.createElement('canvas'); // small canvas for diff check
+  const diffCtx    = diffCanvas.getContext('2d');
+
+  // OCR resolution: max 900px keeps text sharp without bloating the base64 payload
   let w = vid.videoWidth  || 1280;
   let h = vid.videoHeight || 720;
-  if (Math.max(w, h) > 850) {
-    const scale = 850 / Math.max(w, h);
+  if (Math.max(w, h) > 900) {
+    const scale = 900 / Math.max(w, h);
     w = Math.round(w * scale);
     h = Math.round(h * scale);
   }
   capCanvas.width  = w;
   capCanvas.height = h;
 
-  const keyframes = [];
+  // Tiny canvas for scene-change pixel diff (64×36 is enough)
+  diffCanvas.width  = 64;
+  diffCanvas.height = 36;
 
-  // Pick smart timestamps:
-  // For short videos (< 6s): 2 keyframes (25%, 75%)
-  // For medium videos (6s-18s): 3 keyframes (20%, 50%, 80%)
-  // For longer videos (> 18s): 4 keyframes (15%, 40%, 65%, 90%)
-  let sampleTimes = [];
-  if (duration <= 6) {
-    sampleTimes = [duration * 0.3, duration * 0.75];
-  } else if (duration <= 18) {
-    sampleTimes = [duration * 0.2, duration * 0.5, duration * 0.8];
-  } else {
-    sampleTimes = [duration * 0.15, duration * 0.4, duration * 0.65, duration * 0.88];
+  // ── Sample interval: 1 frame every 1.5s (covers up to ~40 bills in a 60s video)
+  // Minimum 2 frames, maximum 40 frames regardless of video length
+  const INTERVAL   = 1.5;   // seconds between candidate samples
+  const MAX_FRAMES = 40;
+  const MIN_FRAMES = 2;
+
+  const totalSamples = Math.max(MIN_FRAMES, Math.min(MAX_FRAMES, Math.floor(duration / INTERVAL)));
+  const step         = duration / totalSamples;
+
+  // Build sample timestamps — evenly spaced, offset by half-step to avoid cut edges
+  const sampleTimes = [];
+  for (let i = 0; i < totalSamples; i++) {
+    const t = Math.min(step * i + step * 0.4, duration - 0.1);
+    sampleTimes.push(parseFloat(t.toFixed(2)));
   }
+
+  // ── Per-frame pixel data for scene-change detection ──────────────────
+  let lastPixels = null;
+
+  // Returns average absolute diff between two Uint8ClampedArrays (0–255)
+  function pixelDiff(a, b) {
+    let sum = 0;
+    for (let i = 0; i < a.length; i += 4) sum += Math.abs(a[i] - b[i]);
+    return sum / (a.length / 4);
+  }
+
+  const keyframes = [];
 
   for (let i = 0; i < sampleTimes.length; i++) {
     const t = sampleTimes[i];
     onProgress(i / sampleTimes.length);
     await seekVideo(vid, t);
 
-    // Draw frame to canvas live
+    // Draw preview to main canvas so user sees progress
     ctx.drawImage(vid, 0, 0, canvas.width, canvas.height);
 
-    // Capture compressed frame
+    // Check scene change using tiny diff canvas
+    diffCtx.drawImage(vid, 0, 0, 64, 36);
+    const pixels = diffCtx.getImageData(0, 0, 64, 36).data;
+
+    // Skip frame if it looks identical to the previous one (diff < 8 / 255)
+    // This avoids sending 3 frames of the same stationary label to Gemini
+    if (lastPixels && pixelDiff(pixels, lastPixels) < 8) {
+      lastPixels = pixels;
+      continue;
+    }
+    lastPixels = pixels;
+
+    // Capture full-res frame for OCR
     capCtx.drawImage(vid, 0, 0, w, h);
     keyframes.push({
-      t: t,
-      dataUrl: capCanvas.toDataURL('image/jpeg', 0.85)
+      t,
+      dataUrl: capCanvas.toDataURL('image/jpeg', 0.88)
     });
   }
 
+  console.log(`[Keyframes] ${sampleTimes.length} sampled → ${keyframes.length} unique after dedup`);
   return keyframes;
 }
 
