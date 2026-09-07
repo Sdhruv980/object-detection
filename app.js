@@ -609,30 +609,48 @@ function handleAction() {
 let allBills = [];
 let billKeyframes = [];
 
-const BILL_PROMPT = `You are a high-speed, accurate document OCR and receipt analysis engine.
-Read this image carefully. Extract all visible text and structured fields from ANY document, shipping label (e.g. Delhivery, Amazon, Flipkart, BlueDart, courier tag), retail bill, tax invoice, restaurant receipt, or cash memo.
+const BILL_PROMPT = `You are a precise OCR engine specialised in Indian courier shipping labels and invoices.
+Read EVERY piece of text visible in this image carefully — including small print, barcodes labels, and handwritten text.
 
-Always output pure JSON adhering to this exact schema:
+Extract ALL of the following fields from the document (shipping label, Delhivery/Amazon/Flipkart/BlueDart tag, tax invoice, retail bill, or receipt):
+
+FOR SHIPPING LABELS specifically look for:
+- AWB / Tracking number (long numeric or alphanumeric code, often under a barcode)
+- Recipient / Consignee name (labelled "To:", "Ship To:", "Deliver To:", or just a name near the address)
+- Recipient full address including house/flat no, street, area, city, state
+- PIN code (6-digit number near the address)
+- Sender / From name and address
+- Product description or SKU (what is being shipped)
+- COD amount (Cash on Delivery — labelled "COD", "Amount", "Invoice Value")
+- Payment mode (Pre-paid / COD)
+- Date of label / shipment date
+- Courier company name (DELHIVERY, Amazon, Flipkart, BlueDart, etc.)
+
+Output ONLY pure JSON in this exact schema — no markdown, no explanation:
 {
   "is_bill": true,
-  "doc_type": "Shipping Label / Tax Invoice / Retail Bill / Receipt / Cash Memo",
-  "vendor_name": "Store name, Seller name, Courier name (e.g. DELHIVERY, Amazon, or Merchant)",
-  "bill_number": "AWB No, Tracking ID, Invoice No, or Bill No if visible",
-  "date": "Date on document if visible",
-  "customer_name": "Recipient or Customer name if visible",
-  "customer_address": "Delivery Address, City, State, or PIN code if visible",
+  "doc_type": "Shipping Label",
+  "vendor_name": "Courier or seller name (e.g. DELHIVERY, Amazon)",
+  "bill_number": "AWB / Tracking ID / Invoice No (exact number from label)",
+  "date": "Date visible on label (e.g. 12-Jan-2024)",
+  "customer_name": "Recipient full name",
+  "customer_address": "Full delivery address including street, area, city, state",
+  "pin_code": "6-digit PIN code",
+  "sender_name": "Sender / From name",
+  "sender_address": "Sender full address",
+  "product_description": "Product name or description being shipped",
   "items": [
-    {"name": "Product or SKU name", "qty": "quantity", "price": "unit price", "amount": "line total"}
+    {"name": "Product name", "qty": "1", "price": "unit price", "amount": "total price"}
   ],
-  "subtotal": "Subtotal amount with currency or null",
-  "tax": "Tax / GST / VAT if shown or null",
-  "discount": "Discount if shown or null",
-  "total": "Total amount with currency (e.g. INR 1098, ₹549.00)",
-  "payment_method": "Pre-paid, COD, Cash, Card, UPI if visible",
-  "notes": "Any other important details"
+  "subtotal": "Subtotal if shown, else null",
+  "tax": "GST / Tax if shown, else null",
+  "discount": "Discount if shown, else null",
+  "total": "COD amount or Invoice value with currency symbol (e.g. ₹549.00)",
+  "payment_method": "Pre-paid or COD",
+  "notes": "Any other text on the label (e.g. fragile, instructions)"
 }
 
-If the image is completely blank, dark, or contains no paper/document/label text at all, output:
+If the image is completely blank, dark, blurry, or has no readable document/label text, output:
 {"is_bill": false}`;
 
 async function loadBillVideo(event) {
@@ -1025,13 +1043,14 @@ function renderBillCard(bill, container) {
        </table>`
     : '';
 
-  const fld = (label, val, isMono = false) => val
-    ? `<div class="bill-field">
-         <span class="bill-label">${label}</span>
-         <span class="bill-val ${isMono ? 'mono' : ''}">${val}</span>
-       </div>`
-    : '';
+  // Always render — shows "—" if value is missing
+  const fld = (label, val, isMono = false) =>
+    `<div class="bill-field">
+       <span class="bill-label">${label}</span>
+       <span class="bill-val ${isMono ? 'mono' : ''}">${val || '—'}</span>
+     </div>`;
 
+  // Only renders if value exists (for multi-line address blocks)
   const infoBox = (label, val) => val
     ? `<div class="bill-info-box">
          <span style="color:#94a3b8;font-weight:600;font-size:10px;text-transform:uppercase">${label}:</span><br>
@@ -1039,44 +1058,87 @@ function renderBillCard(bill, container) {
        </div>`
     : '';
 
-  // Timeline display: show when the bill appears in the video
+  // Timeline display
   const timelineHtml = bill.timestamp !== undefined
-    ? `<div class="bill-timeline" style="background:rgba(56,189,248,0.1);border-left:3px solid #38bdf8;padding:8px 12px;margin:12px 0;font-size:11px;color:#94a3b8">
-         <span style="color:#38bdf8;font-weight:bold">⏱ TIMELINE:</span> 
+    ? `<div class="bill-timeline" style="background:rgba(56,189,248,0.1);border-left:3px solid #38bdf8;padding:8px 12px;margin:0 0 14px 0;font-size:11px;color:#94a3b8;border-radius:0 4px 4px 0">
+         <span style="color:#38bdf8;font-weight:bold">⏱ TIMELINE:</span>
          This bill appears at <strong style="color:#f0c040">${bill.timestamp.toFixed(2)}s</strong> in the video
        </div>`
     : '';
 
-  // Mark unrecognized bills with warning badge
+  // Unrecognized badge
   const isUnrecognized = bill.is_unrecognized || false;
   const unrecognizedBadge = isUnrecognized
-    ? `<span style="background:#f87171;color:#000;padding:4px 8px;border-radius:4px;font-size:10px;font-weight:bold;margin-left:8px">⚠ NOT RECOGNIZED</span>`
+    ? `<span style="background:#f87171;color:#000;padding:3px 7px;border-radius:4px;font-size:10px;font-weight:bold;margin-left:8px">⚠ NOT RECOGNIZED</span>`
     : '';
 
+  // Build the full address string combining address + pin code
+  const fullAddress = [bill.customer_address, bill.pin_code ? `PIN: ${bill.pin_code}` : ''].filter(Boolean).join(' · ') || null;
+  const senderFull  = [bill.sender_name, bill.sender_address].filter(Boolean).join(' — ') || null;
+
   const cardHtml = `
-    <div class="bill-card ${isUnrecognized ? 'unrecognized' : ''}" id="bill-card-${bill.bill_index}" onclick="inspectBillFrame(${bill.bill_index})" style="cursor:pointer;${isUnrecognized ? 'border-color:#f87171;opacity:0.85;' : ''}" title="Click to view this frame on canvas">
+    <div class="bill-card ${isUnrecognized ? 'unrecognized' : ''}"
+         id="bill-card-${bill.bill_index}"
+         onclick="inspectBillFrame(${bill.bill_index})"
+         style="cursor:pointer;${isUnrecognized ? 'border-color:#f87171;opacity:0.85;' : ''}"
+         title="Click to view this frame on canvas">
+
       <div class="bill-card-header">
         <span class="bill-card-num">BILL #${bill.bill_index}</span>
         <span class="bill-card-vendor">${bill.vendor_name || bill.doc_type || 'Document'}${unrecognizedBadge}</span>
       </div>
+
       ${timelineHtml}
+
       <div class="bill-card-body">
-        ${isUnrecognized ? '<div style="padding:12px;background:rgba(248,113,113,0.1);border-radius:6px;margin-bottom:12px;color:#f87171;font-size:11px;font-weight:600">⚠ No data extracted — OCR could not read this bill/label</div>' : ''}
-        ${fld('Doc Type',   bill.doc_type)}
-        ${fld('Bill / AWB', bill.bill_number, true)}
-        ${fld('Date',       bill.date)}
-        ${fld('Customer',   bill.customer_name)}
-        ${infoBox('Delivery Address', bill.customer_address)}
-        ${itemsHtml}
-        ${fld('Subtotal',   bill.subtotal)}
-        ${fld('Tax / GST',  bill.tax)}
-        ${fld('Discount',   bill.discount)}
-        ${fld('Payment',    bill.payment_method)}
-        ${infoBox('Notes',  bill.notes)}
-        ${!isUnrecognized ? `<div class="bill-total-row">
-          <span>TOTAL AMOUNT</span>
-          <strong>${bill.total || '—'}</strong>
-        </div>` : ''}
+        ${isUnrecognized
+          ? `<div style="padding:12px;background:rgba(248,113,113,0.1);border-radius:6px;margin-bottom:12px;color:#f87171;font-size:11px;font-weight:600">
+               ⚠ No data extracted — OCR could not read this bill/label
+             </div>`
+          : ''}
+
+        <div class="bill-fields-grid">
+          ${fld('Doc Type',       bill.doc_type)}
+          ${fld('Bill / AWB No',  bill.bill_number, true)}
+          ${fld('Date',           bill.date)}
+          ${fld('Payment',        bill.payment_method)}
+        </div>
+
+        <div class="bill-section-label">RECIPIENT</div>
+        <div class="bill-fields-grid">
+          ${fld('Customer Name',  bill.customer_name)}
+          ${fld('PIN Code',       bill.pin_code)}
+        </div>
+        ${infoBox('Delivery Address', fullAddress)}
+
+        ${senderFull ? `<div class="bill-section-label">SENDER</div>${infoBox('From', senderFull)}` : ''}
+
+        ${bill.product_description
+          ? `<div class="bill-section-label">PRODUCT</div>
+             <div style="padding:8px 10px;background:rgba(255,255,255,0.04);border-radius:6px;font-size:12px;color:var(--text-bright);margin-bottom:10px">
+               ${bill.product_description}
+             </div>`
+          : ''}
+
+        ${itemsHtml
+          ? `<div class="bill-section-label">ITEMS</div>${itemsHtml}`
+          : ''}
+
+        <div class="bill-section-label">AMOUNTS</div>
+        <div class="bill-fields-grid">
+          ${fld('Subtotal',  bill.subtotal)}
+          ${fld('Tax / GST', bill.tax)}
+          ${fld('Discount',  bill.discount)}
+        </div>
+
+        ${infoBox('Notes', bill.notes)}
+
+        ${!isUnrecognized
+          ? `<div class="bill-total-row">
+               <span>TOTAL / COD AMOUNT</span>
+               <strong>${bill.total || '—'}</strong>
+             </div>`
+          : ''}
       </div>
     </div>`;
 

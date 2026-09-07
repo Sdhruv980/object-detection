@@ -504,6 +504,22 @@ body {
 }
 .bill-val.mono { font-family: var(--mono); font-weight: 600; color: var(--teal); }
 
+/* Section label divider */
+.bill-section-label {
+  font-family: var(--mono); font-size: 10px; font-weight: 700;
+  letter-spacing: .12em; color: var(--teal);
+  text-transform: uppercase;
+  padding: 8px 0 4px 0;
+  border-top: 1px solid rgba(56,189,248,0.15);
+  margin-top: 4px;
+}
+
+/* Fields grid — two-column layout for key/value pairs */
+.bill-fields-grid {
+  display: flex; flex-direction: column; gap: 6px;
+  margin-bottom: 6px;
+}
+
 /* Info box (for address / courier / notes) */
 .bill-info-box {
   background: rgba(255, 255, 255, 0.03);
