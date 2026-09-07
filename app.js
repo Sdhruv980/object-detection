@@ -743,20 +743,19 @@ async function loadBillVideo(event) {
   }
   progressBar.style.width = '90%';
 
-  // Store all keyframes for unrecognized bill tracking
-  billKeyframes = keyframes;
-
-  // Track which keyframes got successfully extracted
-  const extractedKeyframeIndices = new Set();
-
   // ── Step 3: Parse and Deduplicate Extracted Documents ───────────────
   for (let i = 0; i < results.length; i++) {
     const { kf, res } = results[i];
     if (!res) continue;
 
-    // Check if document contains readable data
-    const hasData = res.is_bill || res.bill_number || res.total || res.vendor_name || res.customer_name || (res.items && res.items.length);
-    if (!hasData) continue;
+    // Only process frames where Gemini found actual bill/label data
+    const hasData = res.is_bill ||
+                    res.bill_number ||
+                    res.total ||
+                    res.vendor_name ||
+                    res.customer_name ||
+                    (res.items && res.items.length);
+    if (!hasData) continue;  // blank/transition frame — skip silently
 
     const isDuplicate = checkDuplicateBill(res, allBills);
     if (!isDuplicate) {
@@ -765,39 +764,10 @@ async function loadBillVideo(event) {
       res.frameData  = kf.dataUrl;
       allBills.push(res);
       renderBillCard(res, billBody);
-      extractedKeyframeIndices.add(i);
     }
   }
 
-  // ── Step 4: Add Unrecognized Bills (keyframes with no valid OCR) ────
-  for (let i = 0; i < billKeyframes.length; i++) {
-    if (!extractedKeyframeIndices.has(i)) {
-      // This keyframe didn't produce any valid data
-      const unrecognizedBill = {
-        is_unrecognized: true,
-        bill_index: allBills.length + 1,
-        timestamp: billKeyframes[i].t,
-        frameData: billKeyframes[i].dataUrl,
-        doc_type: 'Unrecognized Label/Bill',
-        vendor_name: 'Not Recognized',
-        bill_number: null,
-        date: null,
-        customer_name: null,
-        customer_address: null,
-        items: [],
-        subtotal: null,
-        tax: null,
-        discount: null,
-        total: null,
-        payment_method: null,
-        notes: 'OCR could not extract data from this frame'
-      };
-      allBills.push(unrecognizedBill);
-      renderBillCard(unrecognizedBill, billBody);
-    }
-  }
-
-  // ── Step 5: Finished ────────────────────────────────────────────────
+  // ── Step 4: Finished ────────────────────────────────────────────────
   billProgress.style.display = 'none';
   progressBar.style.width    = '100%';
   showVideoControls();
@@ -807,19 +777,13 @@ async function loadBillVideo(event) {
     billBody.innerHTML = `<p class="manifest-empty" style="color:#f87171">No bills/labels recognized in the video.${errDetail}</p>`;
   } else {
     flashDetectedHUD(allBills.length, allBills[0].vendor_name || allBills[0].bill_number);
-    
-    // Count recognized vs unrecognized
-    const recognizedCount = allBills.filter(b => !b.is_unrecognized).length;
-    const unrecognizedCount = allBills.filter(b => b.is_unrecognized).length;
-    
     const gt = computeGrandTotal(allBills);
-    const summaryHtml = `
-      <div class="bill-summary-row">
-        <span>📋 <strong>${recognizedCount}</strong> bill${recognizedCount !== 1 ? 's' : ''} extracted${unrecognizedCount > 0 ? `, <strong style="color:#f87171">${unrecognizedCount}</strong> unrecognized` : ''}</span>
-        ${gt ? `<span class="bill-grand-total">Grand Total: <strong>${gt}</strong></span>` : ''}
-      </div>`;
-    
-    billBody.insertAdjacentHTML('beforeend', summaryHtml);
+    billBody.insertAdjacentHTML('beforeend',
+      `<div class="bill-summary-row">
+         <span>📋 <strong>${allBills.length}</strong> bill${allBills.length !== 1 ? 's' : ''} recognized</span>
+         ${gt ? `<span class="bill-grand-total">Grand Total: <strong>${gt}</strong></span>` : ''}
+       </div>`
+    );
     exportRow.style.display = 'flex';
   }
 }
@@ -1113,11 +1077,9 @@ function renderBillCard(bill, container) {
        </div>`
     : '';
 
-  // Unrecognized badge
-  const isUnrecognized = bill.is_unrecognized || false;
-  const unrecognizedBadge = isUnrecognized
-    ? `<span style="background:#f87171;color:#000;padding:3px 7px;border-radius:4px;font-size:10px;font-weight:bold;margin-left:8px">⚠ NOT RECOGNIZED</span>`
-    : '';
+  // Unrecognized badge — kept for safety but should never appear now
+  const isUnrecognized = false;
+  const unrecognizedBadge = '';
 
   // Build the full address string combining address + pin code
   const fullAddress = [bill.customer_address, bill.pin_code ? `PIN: ${bill.pin_code}` : ''].filter(Boolean).join(' · ') || null;
@@ -1132,18 +1094,12 @@ function renderBillCard(bill, container) {
 
       <div class="bill-card-header">
         <span class="bill-card-num">BILL #${bill.bill_index}</span>
-        <span class="bill-card-vendor">${bill.vendor_name || bill.doc_type || 'Document'}${unrecognizedBadge}</span>
+        <span class="bill-card-vendor">${bill.vendor_name || bill.doc_type || 'Document'}</span>
       </div>
 
       ${timelineHtml}
 
       <div class="bill-card-body">
-        ${isUnrecognized
-          ? `<div style="padding:12px;background:rgba(248,113,113,0.1);border-radius:6px;margin-bottom:12px;color:#f87171;font-size:11px;font-weight:600">
-               ⚠ No data extracted — OCR could not read this bill/label
-             </div>`
-          : ''}
-
         <div class="bill-fields-grid">
           ${fld('Doc Type',       bill.doc_type)}
           ${fld('Bill / AWB No',  bill.bill_number, true)}
@@ -1185,8 +1141,7 @@ function renderBillCard(bill, container) {
                <span>TOTAL / COD AMOUNT</span>
                <strong>${bill.total || '—'}</strong>
              </div>`
-          : ''}
-      </div>
+          : ''}      </div>
     </div>`;
 
   container.insertAdjacentHTML('beforeend', cardHtml);
@@ -1218,9 +1173,6 @@ function inspectBillFrame(billIndex) {
 function computeGrandTotal(bills) {
   let sum = 0, cur = '';
   for (const b of bills) {
-    // Skip unrecognized bills in total calculation
-    if (b.is_unrecognized) continue;
-    
     const m = String(b.total || '').match(/([₹$€£]?)([0-9,.]+)/);
     if (m) {
       if (!cur && m[1]) cur = m[1];
