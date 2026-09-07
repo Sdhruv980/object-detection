@@ -847,10 +847,10 @@ async function fastExtractKeyframes(vid, duration, onProgress) {
   diffCanvas.width  = 64;
   diffCanvas.height = 36;
 
-  // ── Sample interval: 1 frame every 1.5s (covers up to ~40 bills in a 60s video)
-  // Minimum 2 frames, maximum 40 frames regardless of video length
-  const INTERVAL   = 1.5;   // seconds between candidate samples
-  const MAX_FRAMES = 40;
+  // ── Sample interval: 1 frame per second (catches bills shown for as little as 2s)
+  // Maximum 60 frames to avoid excessive API cost on very long videos
+  const INTERVAL   = 1.0;   // seconds between candidate samples
+  const MAX_FRAMES = 60;
   const MIN_FRAMES = 2;
 
   const totalSamples = Math.max(MIN_FRAMES, Math.min(MAX_FRAMES, Math.floor(duration / INTERVAL)));
@@ -887,9 +887,10 @@ async function fastExtractKeyframes(vid, duration, onProgress) {
     diffCtx.drawImage(vid, 0, 0, 64, 36);
     const pixels = diffCtx.getImageData(0, 0, 64, 36).data;
 
-    // Skip frame if it looks identical to the previous one (diff < 8 / 255)
-    // This avoids sending 3 frames of the same stationary label to Gemini
-    if (lastPixels && pixelDiff(pixels, lastPixels) < 8) {
+    // Skip frame only if it looks nearly IDENTICAL (same frame, no movement at all)
+    // Threshold raised to 4 — only skip genuine static duplicates, not different labels
+    // Delhivery labels look visually similar but have different AWBs, so we keep them all
+    if (lastPixels && pixelDiff(pixels, lastPixels) < 4) {
       lastPixels = pixels;
       continue;
     }
@@ -914,24 +915,24 @@ function seekVideo(vid, t) {
   });
 }
 
-// Deduplicate bills by Bill No / AWB or Vendor + Total
+// Deduplicate bills — only exact AWB / tracking number match counts.
+// Never merge bills just because they share a vendor name or total amount —
+// multiple Delhivery / Amazon labels in the same video are different shipments.
 function checkDuplicateBill(newBill, existingBills) {
   if (!existingBills.length) return false;
 
-  const newNum = (newBill.bill_number || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
-  const newVen = (newBill.vendor_name || '').trim().toLowerCase();
-  const newTot = (newBill.total || '').trim().toLowerCase();
+  const newNum = (newBill.bill_number || '').trim().replace(/[\s\-]/g, '').toLowerCase();
+  if (!newNum || newNum.length < 6) return false;  // no usable ID → never auto-dedupe
 
   for (const b of existingBills) {
-    const exNum = (b.bill_number || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
-    const exVen = (b.vendor_name || '').trim().toLowerCase();
-    const exTot = (b.total || '').trim().toLowerCase();
+    const exNum = (b.bill_number || '').trim().replace(/[\s\-]/g, '').toLowerCase();
+    if (!exNum || exNum.length < 6) continue;
 
-    // Matching bill number / AWB
-    if (newNum && exNum && (newNum === exNum || newNum.includes(exNum) || exNum.includes(newNum))) return true;
-
-    // Matching vendor and total amount
-    if (newVen && exVen && newTot && exTot && newVen === exVen && newTot === exTot) return true;
+    // Exact match or one contains the other (handles partial scans of same barcode)
+    if (newNum === exNum) return true;
+    if (newNum.length > 8 && exNum.length > 8) {
+      if (newNum.includes(exNum) || exNum.includes(newNum)) return true;
+    }
   }
   return false;
 }
