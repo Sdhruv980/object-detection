@@ -790,11 +790,6 @@ async function loadBillVideo(event) {
     billBody.insertAdjacentHTML('beforeend', summaryHtml);
     exportRow.style.display = 'flex';
   }
-} 's' : ''} extracted</span>
-         ${gt ? `<span class="bill-grand-total">Grand Total: <strong>${gt}</strong></span>` : ''}
-       </div>`);
-    exportRow.style.display = 'flex';
-  }
 }
 
 // Fast Keyframe Extraction: Samples 2-4 optimal frames across video in milliseconds
