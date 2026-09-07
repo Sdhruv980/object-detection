@@ -743,10 +743,10 @@ async function loadBillVideo(event) {
   }
   progressBar.style.width = '90%';
 
-  // ── Step 3: Parse Extracted Documents (NO deduplication — show everything) ──
-  // Deduplication was collapsing different bills. Now we show every frame where
-  // Gemini found ANY readable text, even if bill_number or total is missing.
+  // ── Step 3: Parse and Deduplicate by AWB Number ─────────────────────
+  // Show each unique bill once — deduplicate by exact AWB/tracking number
   console.log(`[OCR Results] Processing ${results.length} frames...`);
+  
   for (let i = 0; i < results.length; i++) {
     const { kf, res } = results[i];
     if (!res) {
@@ -754,7 +754,7 @@ async function loadBillVideo(event) {
       continue;
     }
 
-    // Very permissive check — if Gemini returned ANYTHING useful, show it
+    // Very permissive check — if Gemini returned ANYTHING useful, process it
     const hasData = res.is_bill ||
                     res.bill_number ||
                     res.total ||
@@ -769,6 +769,14 @@ async function loadBillVideo(event) {
       continue;
     }
 
+    // Check if this is a duplicate bill (same AWB already extracted)
+    const isDuplicate = checkDuplicateBill(res, allBills);
+    
+    if (isDuplicate) {
+      console.log(`  Frame ${i + 1} @ ${kf.t.toFixed(2)}s: DUPLICATE of AWB ${res.bill_number || 'N/A'} — skipped`);
+      continue;
+    }
+
     console.log(`  Frame ${i + 1} @ ${kf.t.toFixed(2)}s: ✓ ${res.vendor_name || res.doc_type || 'Document'} | AWB: ${res.bill_number || 'N/A'} | Total: ${res.total || 'N/A'}`);
 
     res.bill_index = allBills.length + 1;
@@ -777,7 +785,7 @@ async function loadBillVideo(event) {
     allBills.push(res);
     renderBillCard(res, billBody);
   }
-  console.log(`[OCR Results] ${allBills.length} bills extracted from ${results.length} frames`);
+  console.log(`[OCR Results] ${allBills.length} unique bills extracted from ${results.length} frames`);
 
   // ── Step 4: Finished ────────────────────────────────────────────────
   billProgress.style.display = 'none';
@@ -891,25 +899,27 @@ function seekVideo(vid, t) {
   });
 }
 
-// Deduplicate bills — only exact AWB / tracking number match counts.
-// Never merge bills just because they share a vendor name or total amount —
-// multiple Delhivery / Amazon labels in the same video are different shipments.
+// Strict duplicate detection: only exact AWB match counts.
+// If no AWB, never auto-dedupe (treat as unique).
 function checkDuplicateBill(newBill, existingBills) {
   if (!existingBills.length) return false;
 
-  const newNum = (newBill.bill_number || '').trim().replace(/[\s\-]/g, '').toLowerCase();
-  if (!newNum || newNum.length < 6) return false;  // no usable ID → never auto-dedupe
+  // Clean and normalize the new bill's AWB number
+  const newNum = (newBill.bill_number || '').trim().replace(/[\s\-_]/g, '').toUpperCase();
+  
+  // If no AWB or too short, treat as unique (don't dedupe)
+  if (!newNum || newNum.length < 8) return false;
 
   for (const b of existingBills) {
-    const exNum = (b.bill_number || '').trim().replace(/[\s\-]/g, '').toLowerCase();
-    if (!exNum || exNum.length < 6) continue;
+    const exNum = (b.bill_number || '').trim().replace(/[\s\-_]/g, '').toUpperCase();
+    if (!exNum || exNum.length < 8) continue;
 
-    // Exact match or one contains the other (handles partial scans of same barcode)
-    if (newNum === exNum) return true;
-    if (newNum.length > 8 && exNum.length > 8) {
-      if (newNum.includes(exNum) || exNum.includes(newNum)) return true;
+    // Only exact full match counts as duplicate
+    if (newNum === exNum) {
+      return true;
     }
   }
+  
   return false;
 }
 
