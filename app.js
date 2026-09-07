@@ -1,6 +1,7 @@
 'use strict';
 /**
- * app.js — Object Detection Lab
+ * app.js — Object Detection Lab  v1.3
+ * Build: 2026-08-26
  *
  * Detection:    COCO-SSD (TensorFlow.js, fully in-browser)
  * Description:  Google Gemini 3.7 Flash (vision API)
