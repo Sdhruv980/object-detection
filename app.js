@@ -1,10 +1,10 @@
 'use strict';
 /**
- * app.js — Object Detection Lab  v1.3
+ * app.js — Object Detection Lab  v1.5
  * Build: 2026-08-26
  *
  * Detection:    COCO-SSD (TensorFlow.js, fully in-browser)
- * Description:  Google Gemini 3.7 Flash (vision API)
+ * Description:  Google Gemini 2.0 Flash (vision API)
  *
  * API key is loaded from config.js (generated from .env — never commit config.js).
  */
@@ -15,7 +15,7 @@ const GEMINI_API_KEY = (typeof window !== 'undefined' && (window.GEMINI_API_KEY 
   : '';
 
 // ── Config ──────────────────────────────────────────────────────────────────
-const GEMINI_MODEL  = 'gemini-3.7-flash';
+const GEMINI_MODEL  = 'gemini-2.0-flash-exp';
 const GEMINI_URL    = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 const MAX_IMG_PX    = 1920;
 const CONF_IMG      = 0.08;   // lower threshold → detects small and low-contrast objects
@@ -914,11 +914,10 @@ function checkDuplicateBill(newBill, existingBills) {
 }
 
 const FALLBACK_MODELS = [
-  'gemini-3.7-flash',      // primary — Gemini 3.7 Flash, fast + accurate
-  'gemini-3.6-flash',      // fallback 1
-  'gemini-3.5-flash',      // fallback 2
-  'gemini-2.0-flash',      // fallback 3 — older but very stable
-  'gemini-1.5-flash'       // last resort — always available
+  'gemini-2.0-flash-exp',   // primary — latest experimental, best quality
+  'gemini-1.5-flash',       // fallback 1 — stable, always available
+  'gemini-1.5-flash-8b',    // fallback 2 — faster, good for high volume
+  'gemini-1.5-pro'          // fallback 3 — most capable but slower
 ];
 
 async function analyzeBillFrame(dataUrl) {
