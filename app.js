@@ -743,29 +743,41 @@ async function loadBillVideo(event) {
   }
   progressBar.style.width = '90%';
 
-  // ── Step 3: Parse and Deduplicate Extracted Documents ───────────────
+  // ── Step 3: Parse Extracted Documents (NO deduplication — show everything) ──
+  // Deduplication was collapsing different bills. Now we show every frame where
+  // Gemini found ANY readable text, even if bill_number or total is missing.
+  console.log(`[OCR Results] Processing ${results.length} frames...`);
   for (let i = 0; i < results.length; i++) {
     const { kf, res } = results[i];
-    if (!res) continue;
+    if (!res) {
+      console.log(`  Frame ${i + 1} @ ${kf.t.toFixed(2)}s: OCR failed (null response)`);
+      continue;
+    }
 
-    // Only process frames where Gemini found actual bill/label data
+    // Very permissive check — if Gemini returned ANYTHING useful, show it
     const hasData = res.is_bill ||
                     res.bill_number ||
                     res.total ||
                     res.vendor_name ||
                     res.customer_name ||
+                    res.customer_address ||
+                    res.doc_type ||
                     (res.items && res.items.length);
-    if (!hasData) continue;  // blank/transition frame — skip silently
 
-    const isDuplicate = checkDuplicateBill(res, allBills);
-    if (!isDuplicate) {
-      res.bill_index = allBills.length + 1;
-      res.timestamp  = kf.t;
-      res.frameData  = kf.dataUrl;
-      allBills.push(res);
-      renderBillCard(res, billBody);
+    if (!hasData) {
+      console.log(`  Frame ${i + 1} @ ${kf.t.toFixed(2)}s: Blank (is_bill=${res.is_bill})`);
+      continue;
     }
+
+    console.log(`  Frame ${i + 1} @ ${kf.t.toFixed(2)}s: ✓ ${res.vendor_name || res.doc_type || 'Document'} | AWB: ${res.bill_number || 'N/A'} | Total: ${res.total || 'N/A'}`);
+
+    res.bill_index = allBills.length + 1;
+    res.timestamp  = kf.t;
+    res.frameData  = kf.dataUrl;
+    allBills.push(res);
+    renderBillCard(res, billBody);
   }
+  console.log(`[OCR Results] ${allBills.length} bills extracted from ${results.length} frames`);
 
   // ── Step 4: Finished ────────────────────────────────────────────────
   billProgress.style.display = 'none';
