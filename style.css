@@ -420,6 +420,22 @@ body {
 .btn-refresh:hover { background: rgba(240, 192, 64, 0.22); }
 .btn-refresh:disabled { opacity: .45; cursor: not-allowed; }
 
+/* Excel export button — green accent, primary action */
+.btn-excel {
+  display: inline-flex; align-items: center; gap: 6px;
+  border-radius: 6px; padding: 8px 18px;
+  font-family: var(--sans); font-size: 12px; font-weight: 700;
+  cursor: pointer; transition: background .2s, transform .15s, box-shadow .2s;
+  background: rgba(52, 211, 153, 0.15);
+  border: 1px solid rgba(52, 211, 153, 0.55);
+  color: #34d399;
+}
+.btn-excel:hover {
+  background: rgba(52, 211, 153, 0.28);
+  box-shadow: 0 0 14px rgba(52, 211, 153, 0.3);
+  transform: translateY(-1px);
+}
+
 /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
    BILL SCANNER PANEL & HIGH-CONTRAST CARDS
 â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */

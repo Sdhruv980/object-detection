@@ -1204,6 +1204,125 @@ function exportBillsCSV() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// EXCEL EXPORT  (SheetJS / xlsx)
+// Generates a formatted .xlsx with two sheets:
+//   Sheet 1 — "Bills Summary"  : one row per recognized bill (all key fields)
+//   Sheet 2 — "Items Detail"   : one row per line-item across all bills
+// ═══════════════════════════════════════════════════════════════════════════
+function exportBillsExcel() {
+  if (!allBills.length) { alert('No bills to export yet.'); return; }
+
+  if (typeof XLSX === 'undefined') {
+    alert('Excel library not loaded. Please refresh the page and try again.');
+    return;
+  }
+
+  // ── Sheet 1: Bills Summary ───────────────────────────────────────────
+  const summaryHeaders = [
+    'Bill #', 'Doc Type', 'Vendor / Courier', 'AWB / Bill No',
+    'Date', 'Customer Name', 'Delivery Address', 'PIN Code',
+    'Sender Name', 'Sender Address', 'Product Description',
+    'Subtotal', 'Tax / GST', 'Discount', 'Total / COD Amount',
+    'Payment Method', 'Notes', 'Appears At (sec)', 'Status'
+  ];
+
+  const summaryRows = allBills.map(b => [
+    b.bill_index,
+    b.doc_type             || '—',
+    b.vendor_name          || '—',
+    b.bill_number          || '—',
+    b.date                 || '—',
+    b.customer_name        || '—',
+    b.customer_address     || '—',
+    b.pin_code             || '—',
+    b.sender_name          || '—',
+    b.sender_address       || '—',
+    b.product_description  || '—',
+    b.subtotal             || '—',
+    b.tax                  || '—',
+    b.discount             || '—',
+    b.total                || '—',
+    b.payment_method       || '—',
+    b.notes                || '—',
+    b.timestamp !== undefined ? parseFloat(b.timestamp.toFixed(2)) : '—',
+    b.is_unrecognized ? 'NOT RECOGNIZED' : 'RECOGNIZED'
+  ]);
+
+  const summarySheet = XLSX.utils.aoa_to_sheet([summaryHeaders, ...summaryRows]);
+
+  // Column widths for readability
+  summarySheet['!cols'] = [
+    { wch: 7  },  // Bill #
+    { wch: 18 },  // Doc Type
+    { wch: 20 },  // Vendor
+    { wch: 22 },  // AWB
+    { wch: 14 },  // Date
+    { wch: 22 },  // Customer Name
+    { wch: 35 },  // Address
+    { wch: 10 },  // PIN
+    { wch: 20 },  // Sender Name
+    { wch: 30 },  // Sender Address
+    { wch: 30 },  // Product
+    { wch: 12 },  // Subtotal
+    { wch: 12 },  // Tax
+    { wch: 12 },  // Discount
+    { wch: 18 },  // Total
+    { wch: 14 },  // Payment
+    { wch: 30 },  // Notes
+    { wch: 14 },  // Timestamp
+    { wch: 16 },  // Status
+  ];
+
+  // ── Sheet 2: Items Detail ────────────────────────────────────────────
+  const itemHeaders = ['Bill #', 'Vendor / Courier', 'AWB / Bill No', 'Item Name', 'Qty', 'Unit Price', 'Line Total'];
+  const itemRows = [];
+  for (const b of allBills) {
+    if (b.is_unrecognized) continue;
+    const items = b.items || [];
+    if (items.length) {
+      for (const it of items) {
+        itemRows.push([
+          b.bill_index,
+          b.vendor_name  || '—',
+          b.bill_number  || '—',
+          it.name        || '—',
+          it.qty         || '1',
+          it.price       || '—',
+          it.amount      || it.price || '—'
+        ]);
+      }
+    } else {
+      // No line items — still add a summary row
+      itemRows.push([
+        b.bill_index,
+        b.vendor_name         || '—',
+        b.bill_number         || '—',
+        b.product_description || '—',
+        '1', '—',
+        b.total               || '—'
+      ]);
+    }
+  }
+
+  const itemSheet = XLSX.utils.aoa_to_sheet(
+    itemRows.length ? [itemHeaders, ...itemRows] : [itemHeaders, ['No line-item data extracted']]
+  );
+  itemSheet['!cols'] = [
+    { wch: 7  }, { wch: 20 }, { wch: 22 },
+    { wch: 35 }, { wch: 6  }, { wch: 14 }, { wch: 14 }
+  ];
+
+  // ── Build Workbook ────────────────────────────────────────────────────
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, summarySheet, 'Bills Summary');
+  XLSX.utils.book_append_sheet(wb, itemSheet,    'Items Detail');
+
+  // Filename: bills_YYYY-MM-DD.xlsx
+  const dateStr = new Date().toISOString().slice(0, 10);
+  XLSX.writeFile(wb, `bills_${dateStr}.xlsx`);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // CANVAS HELPERS
 // ═══════════════════════════════════════════════════════════════════════════
 function showCanvas()      { placeholder.style.display='none'; canvas.style.display='block'; }
