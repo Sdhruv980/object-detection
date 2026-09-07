@@ -743,14 +743,17 @@ async function loadBillVideo(event) {
   }
   progressBar.style.width = '90%';
 
-  // ── Step 3: Parse and Deduplicate by AWB Number ─────────────────────
-  // Show each unique bill once — deduplicate by exact AWB/tracking number
+  // ── Step 3: Parse and Deduplicate by AWB + Customer ─────────────────
+  // Show each unique bill once — deduplicate by AWB OR customer name+address
   console.log(`[OCR Results] Processing ${results.length} frames...`);
+  
+  const failedFrames = []; // Track frames where OCR failed or returned no data
   
   for (let i = 0; i < results.length; i++) {
     const { kf, res } = results[i];
     if (!res) {
       console.log(`  Frame ${i + 1} @ ${kf.t.toFixed(2)}s: OCR failed (null response)`);
+      failedFrames.push({ t: kf.t, reason: 'OCR API error', dataUrl: kf.dataUrl });
       continue;
     }
 
@@ -766,18 +769,19 @@ async function loadBillVideo(event) {
 
     if (!hasData) {
       console.log(`  Frame ${i + 1} @ ${kf.t.toFixed(2)}s: Blank (is_bill=${res.is_bill})`);
+      failedFrames.push({ t: kf.t, reason: 'No readable data', dataUrl: kf.dataUrl });
       continue;
     }
 
-    // Check if this is a duplicate bill (same AWB already extracted)
+    // Check if this is a duplicate bill (same AWB OR same customer+address)
     const isDuplicate = checkDuplicateBill(res, allBills);
     
     if (isDuplicate) {
-      console.log(`  Frame ${i + 1} @ ${kf.t.toFixed(2)}s: DUPLICATE of AWB ${res.bill_number || 'N/A'} — skipped`);
+      console.log(`  Frame ${i + 1} @ ${kf.t.toFixed(2)}s: DUPLICATE (AWB: ${res.bill_number || 'N/A'}, Customer: ${res.customer_name || 'N/A'}) — skipped`);
       continue;
     }
 
-    console.log(`  Frame ${i + 1} @ ${kf.t.toFixed(2)}s: ✓ ${res.vendor_name || res.doc_type || 'Document'} | AWB: ${res.bill_number || 'N/A'} | Total: ${res.total || 'N/A'}`);
+    console.log(`  Frame ${i + 1} @ ${kf.t.toFixed(2)}s: ✓ ${res.vendor_name || res.doc_type || 'Document'} | AWB: ${res.bill_number || 'N/A'} | Customer: ${res.customer_name || 'N/A'}`);
 
     res.bill_index = allBills.length + 1;
     res.timestamp  = kf.t;
@@ -786,6 +790,26 @@ async function loadBillVideo(event) {
     renderBillCard(res, billBody);
   }
   console.log(`[OCR Results] ${allBills.length} unique bills extracted from ${results.length} frames`);
+  
+  // Show failed OCR frames at the bottom
+  if (failedFrames.length > 0) {
+    billBody.insertAdjacentHTML('beforeend', `
+      <div style="margin-top:20px;padding:16px;background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.3);border-radius:8px">
+        <div style="font-family:var(--mono);font-size:11px;font-weight:700;color:#f87171;letter-spacing:.08em;margin-bottom:10px">
+          ⚠ ${failedFrames.length} FRAME${failedFrames.length !== 1 ? 'S' : ''} NOT RECOGNIZED
+        </div>
+        ${failedFrames.map(f => `
+          <div style="display:flex;gap:10px;align-items:center;padding:6px 0;border-bottom:1px solid rgba(248,113,113,0.15)">
+            <img src="${f.dataUrl}" style="width:80px;height:60px;object-fit:cover;border-radius:4px;border:1px solid rgba(248,113,113,0.3)">
+            <div style="flex:1">
+              <div style="font-size:11px;color:#94a3b8">Frame at <strong style="color:#f0c040">${f.t.toFixed(2)}s</strong></div>
+              <div style="font-size:10px;color:#f87171">${f.reason}</div>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    `);
+  }
 
   // ── Step 4: Finished ────────────────────────────────────────────────
   billProgress.style.display = 'none';
@@ -899,24 +923,32 @@ function seekVideo(vid, t) {
   });
 }
 
-// Strict duplicate detection: only exact AWB match counts.
-// If no AWB, never auto-dedupe (treat as unique).
+// Duplicate detection: match by AWB OR customer name + PIN code
+// This catches OCR misreads of the same label (e.g. AWB 487406100**41790** vs 491412101**04790**)
 function checkDuplicateBill(newBill, existingBills) {
   if (!existingBills.length) return false;
 
-  // Clean and normalize the new bill's AWB number
+  // Clean and normalize AWB
   const newNum = (newBill.bill_number || '').trim().replace(/[\s\-_]/g, '').toUpperCase();
-  
-  // If no AWB or too short, treat as unique (don't dedupe)
-  if (!newNum || newNum.length < 8) return false;
+  const newCustomer = (newBill.customer_name || '').trim().toLowerCase();
+  const newPin = (newBill.pin_code || '').trim().replace(/\D/g, ''); // digits only
 
   for (const b of existingBills) {
     const exNum = (b.bill_number || '').trim().replace(/[\s\-_]/g, '').toUpperCase();
-    if (!exNum || exNum.length < 8) continue;
+    const exCustomer = (b.customer_name || '').trim().toLowerCase();
+    const exPin = (b.pin_code || '').trim().replace(/\D/g, '');
 
-    // Only exact full match counts as duplicate
-    if (newNum === exNum) {
-      return true;
+    // Method 1: Exact AWB match (min 8 chars)
+    if (newNum && exNum && newNum.length >= 8 && exNum.length >= 8) {
+      if (newNum === exNum) return true;
+    }
+
+    // Method 2: Same customer name + same PIN code = duplicate
+    // (catches OCR misreads of same label with slightly different AWB)
+    if (newCustomer && exCustomer && newPin && exPin) {
+      if (newCustomer === exCustomer && newPin === exPin) {
+        return true;
+      }
     }
   }
   
