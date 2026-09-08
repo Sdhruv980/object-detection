@@ -19,7 +19,7 @@ const GEMINI_API_KEY = (typeof window !== 'undefined' && (window.GEMINI_API_KEY 
 const GEMINI_MODEL  = 'gemini-3.6-flash';
 const GEMINI_URL    = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 const MAX_IMG_PX    = 1920;
-const CONF_IMG      = 0.08;   // lower threshold → detects small and low-contrast objects
+const CONF_IMG      = 0.05;   // low threshold → catches more objects, Gemini filters false positives
 const CONF_VIDEO    = 0.25;   // balanced — reduces false-positive flicker in video
 const CONF_WEBCAM   = 0.20;   // slightly lower for live lighting variation
 
@@ -485,8 +485,11 @@ async function verifyDetectionsWithGemini(resizedCanvas, preds) {
 
   const uniqueClasses = [...new Set((preds || []).map(p => p.class))];
 
+  const cocoFound = uniqueClasses.length > 0;
   const verifyPrompt = `You are a world-class computer vision object detection system specialised in precise labelling.
-The local detector found: ${uniqueClasses.length ? uniqueClasses.join(', ') : 'none'}.
+${cocoFound
+  ? `The local detector found: ${uniqueClasses.join(', ')}. Verify these AND find everything else missed.`
+  : `The local detector found NOTHING. Detect ALL objects in this image from scratch.`}
 
 CRITICAL MISCLASSIFICATION FIXES — apply these first:
 - Any flat rectangular item on a WALL → it is a photo frame, world map, wall art, painting or poster — NEVER a rug/carpet
@@ -1733,7 +1736,17 @@ function loadImage(event) {
     copyBtn.style.display = 'none';
 
     // ── Smart detection: YOLO-World first, COCO-SSD fallback ────────────
-    let preds = await smartDetect(rc, 100, CONF_IMG);
+    // Run COCO-SSD with very low threshold to catch everything
+    let preds = [];
+    if (cocoModel) {
+      const raw = await cocoModel.detect(rc, 100);
+      preds = raw; // keep all, filter by threshold when drawing
+    }
+    // If YOLO is ready use it too and merge unique results
+    if (yoloReady) {
+      const yoloPreds = await detectWithYolo(rc, 0.05);
+      if (yoloPreds && yoloPreds.length > 0) preds = yoloPreds;
+    }
     drawDetections(rc, preds, CONF_IMG);
     const initEngine = yoloReady ? 'YOLO-WORLD' : 'COCO-SSD';
     updateManifest(preds, initEngine, CONF_IMG);
