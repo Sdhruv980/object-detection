@@ -2304,20 +2304,20 @@ canvas.addEventListener('touchend', async e => {
   await detectRegion(rx, ry, rw, rh);
 }, { passive: false });
 
-// Crop canvas to region, run detection, show results
+// Crop canvas to region — two-phase detection:
+//   Phase 1: COCO-SSD (instant ~50ms) → shows boxes immediately
+//   Phase 2: Gemini (3-5s background) → silently upgrades labels
 async function detectRegion(rx, ry, rw, rh) {
   if (!lastSourceCanvas) return;
 
-  manifestBody.innerHTML = `<p class="manifest-empty" style="color:#a78bfa">⟳ Analysing selected region with Gemini…</p>`;
-
-  // ── Crop from clean source image ────────────────────────────────────
+  // ── Shared helpers ───────────────────────────────────────────────────
   const crop = document.createElement('canvas');
   crop.width  = rw;
   crop.height = rh;
   crop.getContext('2d').drawImage(lastSourceCanvas, rx, ry, rw, rh, 0, 0, rw, rh);
 
-  // Upscale small crops so both COCO-SSD and Gemini have enough pixels
-  const MIN_SIDE = 320;
+  // Upscale small crops so COCO-SSD has enough pixels
+  const MIN_SIDE = 400;
   let detectCanvas = crop;
   let upscale = 1;
   if (rw < MIN_SIDE || rh < MIN_SIDE) {
@@ -2328,7 +2328,6 @@ async function detectRegion(rx, ry, rw, rh) {
     detectCanvas.getContext('2d').drawImage(crop, 0, 0, detectCanvas.width, detectCanvas.height);
   }
 
-  // ── Restore image + draw region border immediately ───────────────────
   const redrawBase = () => {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(lastSourceCanvas, 0, 0, canvas.width, canvas.height);
@@ -2338,119 +2337,119 @@ async function detectRegion(rx, ry, rw, rh) {
     ctx.setLineDash([]); ctx.restore();
   };
 
-  const drawPred = (p) => {
-    if (p.score < 0.15) return;
-    const [x, y, w, h] = p.bbox;
-    const color = colorFor(p.class);
-    const label = p.class.toUpperCase() + '  ' + (p.score * 100).toFixed(0) + '%';
-    ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.strokeRect(x, y, w, h);
-    ctx.font = 'bold 12px "Courier New"';
-    const tw = ctx.measureText(label).width + 14;
-    const ly = y > 26 ? y - 24 : y + 2;
-    ctx.fillStyle = color; ctx.fillRect(x, ly, tw, 22);
-    ctx.fillStyle = '#000'; ctx.fillText(label, x + 7, ly + 15);
+  const drawPreds = (preds, minScore) => {
+    preds.forEach(p => {
+      if (p.score < (minScore || 0.05)) return;
+      const [x, y, w, h] = p.bbox;
+      const color = colorFor(p.class);
+      const label = p.class.toUpperCase() + '  ' + (p.score * 100).toFixed(0) + '%';
+      ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.strokeRect(x, y, w, h);
+      ctx.font = 'bold 12px "Courier New"';
+      const tw = ctx.measureText(label).width + 14;
+      const ly = y > 26 ? y - 24 : y + 2;
+      ctx.fillStyle = color; ctx.fillRect(x, ly, tw, 22);
+      ctx.fillStyle = '#000'; ctx.fillText(label, x + 7, ly + 15);
+    });
   };
 
+  const mapToCanvas = (preds) => preds.map(p => ({
+    ...p,
+    bbox: [
+      Math.round(p.bbox[0] / upscale) + rx,
+      Math.round(p.bbox[1] / upscale) + ry,
+      Math.round(p.bbox[2] / upscale),
+      Math.round(p.bbox[3] / upscale)
+    ]
+  }));
+
+  // ── PHASE 1: COCO-SSD — instant result (~50ms) ───────────────────────
   redrawBase();
+  manifestBody.innerHTML = `<p class="manifest-empty" style="color:#a78bfa">⟳ Scanning region…</p>`;
 
-  // ── Strategy: Gemini first (best for regions), then COCO-SSD fallback ─
-  const hasKey = geminiKey || (typeof localStorage !== 'undefined' && localStorage.getItem('GEMINI_API_KEY'));
-
-  let finalPreds = [];
-
-  if (hasKey && hasKey !== 'YOUR_GEMINI_API_KEY_HERE') {
-    // Use Gemini Vision directly on the crop — most accurate for arbitrary regions
+  let cocoP = [];
+  if (cocoModel) {
     try {
-      const regionPrompt = `You are a precise object detection system.
-Detect and label EVERY object visible in this cropped image region.
-Be specific — distinguish between similar objects:
-- flat rectangular items on walls = photo frame / world map / wall art / painting (NOT rug)
-- round objects = exercise ball / globe / clock face (NOT sports ball unless in gym)
-- textured flat items on floor = area rug / floor mat
-- bags = backpack / handbag / tote bag
-
-Return ONLY valid JSON — no markdown:
-{
-  "detected_objects": [
-    {"label": "world map", "score": 0.97, "box": [ymin, xmin, ymax, xmax]},
-    {"label": "photo frame", "score": 0.92, "box": [ymin, xmin, ymax, xmax]}
-  ]
-}
-Coordinates [ymin, xmin, ymax, xmax] normalized 0–1000. Be exhaustive — detect everything visible.`;
-
-      const base64 = detectCanvas.toDataURL('image/jpeg', 0.92).split(',')[1];
-      const payload = {
-        contents: [{ parts: [
-          { text: regionPrompt },
-          { inline_data: { mime_type: 'image/jpeg', data: base64 } }
-        ]}],
-        generationConfig: { temperature: 0.1, maxOutputTokens: 1500 }
-      };
-
-      const text = await callGeminiApi(payload);
-      let parsed = null;
-      try {
-        const clean = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
-        parsed = JSON.parse(clean);
-      } catch (_) {
-        const f = text.indexOf('{'), l = text.lastIndexOf('}');
-        if (f !== -1 && l !== -1) parsed = JSON.parse(text.slice(f, l + 1));
-      }
-
-      if (parsed && parsed.detected_objects) {
-        for (const obj of parsed.detected_objects) {
-          if (!obj.box || obj.box.length !== 4) continue;
-          const [ymin, xmin, ymax, xmax] = obj.box;
-          // Convert from upscaled crop coords → original canvas coords
-          const bx = Math.round((xmin / 1000) * rw / upscale) + rx;
-          const by = Math.round((ymin / 1000) * rh / upscale) + ry;
-          const bw = Math.round(((xmax - xmin) / 1000) * rw / upscale);
-          const bh = Math.round(((ymax - ymin) / 1000) * rh / upscale);
-          if (bw < 5 || bh < 5) continue;
-          finalPreds.push({
-            class: obj.label || 'object',
-            score: obj.score || 0.92,
-            bbox: [bx, by, bw, bh],
-            geminiAdded: true
-          });
-        }
-      }
-    } catch (e) {
-      console.warn('[Region Gemini] failed:', e.message);
-    }
+      const raw = await cocoModel.detect(detectCanvas, 60);
+      cocoP = mapToCanvas(raw.filter(p => p.score >= 0.05));
+    } catch (e) { console.warn('[Region COCO] failed:', e.message); }
   }
 
-  // ── COCO-SSD fallback if Gemini found nothing ─────────────────────────
-  if (finalPreds.length === 0 && cocoModel) {
-    manifestBody.innerHTML = `<p class="manifest-empty" style="color:#a78bfa">⟳ Running COCO-SSD on region…</p>`;
-    try {
-      const rawPreds = await cocoModel.detect(detectCanvas, 50);
-      finalPreds = rawPreds
-        .filter(p => p.score >= 0.05)
-        .map(p => ({
-          ...p,
-          bbox: [
-            Math.round(p.bbox[0] / upscale) + rx,
-            Math.round(p.bbox[1] / upscale) + ry,
-            Math.round(p.bbox[2] / upscale),
-            Math.round(p.bbox[3] / upscale)
-          ]
-        }));
-    } catch (e) {
-      console.warn('[Region COCO] failed:', e.message);
-    }
-  }
-
-  // ── Draw results ──────────────────────────────────────────────────────
+  // Show COCO results immediately — user sees boxes within 50ms
   redrawBase();
-  finalPreds.forEach(drawPred);
+  drawPreds(cocoP, 0.05);
+  updateManifest(cocoP, 'COCO REGION', 0.05);
 
-  if (finalPreds.length === 0) {
-    updateManifest([], 'REGION', 0.05);
-    manifestBody.innerHTML = `<p class="manifest-empty" style="color:#f87171">No objects detected in this region. Try selecting a larger area.</p>`;
+  if (cocoP.length === 0) {
+    manifestBody.innerHTML = `<p class="manifest-empty" style="color:#f0c040">⟳ No quick detections — Gemini analysing…</p>`;
   } else {
-    const engine = hasKey ? 'REGION + GEMINI ✓' : 'REGION COCO-SSD';
-    updateManifest(finalPreds, engine, 0.15);
+    manifestBody.innerHTML += `<p class="manifest-empty" style="font-size:10px;color:var(--text-dim);margin-top:4px">⟳ Gemini refining labels…</p>`;
+  }
+
+  // ── PHASE 2: Gemini in background — refines labels (3-5s) ────────────
+  const hasKey = geminiKey || (typeof localStorage !== 'undefined' && localStorage.getItem('GEMINI_API_KEY'));
+  if (!hasKey || hasKey === 'YOUR_GEMINI_API_KEY_HERE') return;
+
+  try {
+    // Use smallest possible image (256px) for fastest Gemini response
+    const geminiCanvas = document.createElement('canvas');
+    const GS = 256;
+    const gs = Math.min(GS / rw, GS / rh);
+    geminiCanvas.width  = Math.round(rw * gs);
+    geminiCanvas.height = Math.round(rh * gs);
+    geminiCanvas.getContext('2d').drawImage(crop, 0, 0, geminiCanvas.width, geminiCanvas.height);
+    const base64 = geminiCanvas.toDataURL('image/jpeg', 0.80).split(',')[1];
+
+    const regionPrompt = 'Detect every object in this image. Be specific:\n' +
+      '- wall items: photo frame / world map / wall art / painting (NOT rug)\n' +
+      '- floor items: area rug / floor mat (only if on floor)\n' +
+      '- round: globe / exercise ball / clock\n' +
+      '- bags: backpack / handbag\n\n' +
+      'Return ONLY JSON (no markdown):\n' +
+      '{"detected_objects":[{"label":"world map","score":0.97,"box":[ymin,xmin,ymax,xmax]}]}\n' +
+      'Coords 0-1000. List everything visible.';
+
+    const payload = {
+      contents: [{ parts: [
+        { text: regionPrompt },
+        { inline_data: { mime_type: 'image/jpeg', data: base64 } }
+      ]}],
+      generationConfig: { temperature: 0.1, maxOutputTokens: 600 }
+    };
+
+    const text = await callGeminiApi(payload);
+    let parsed = null;
+    try {
+      const clean = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+      parsed = JSON.parse(clean);
+    } catch (_) {
+      const f = text.indexOf('{'), l = text.lastIndexOf('}');
+      if (f !== -1 && l !== -1) try { parsed = JSON.parse(text.slice(f, l + 1)); } catch(_) {}
+    }
+
+    if (!parsed || !parsed.detected_objects) return;
+
+    const geminiPreds = [];
+    for (const obj of parsed.detected_objects) {
+      if (!obj.box || obj.box.length !== 4) continue;
+      const [ymin, xmin, ymax, xmax] = obj.box;
+      const bx = Math.round((xmin / 1000) * rw) + rx;
+      const by = Math.round((ymin / 1000) * rh) + ry;
+      const bw = Math.round(((xmax - xmin) / 1000) * rw);
+      const bh = Math.round(((ymax - ymin) / 1000) * rh);
+      if (bw < 5 || bh < 5) continue;
+      geminiPreds.push({ class: obj.label || 'object', score: obj.score || 0.92, bbox: [bx, by, bw, bh], geminiAdded: true });
+    }
+
+    if (geminiPreds.length === 0) return;
+
+    // Silently upgrade the canvas with Gemini results
+    redrawBase();
+    drawPreds(geminiPreds, 0.1);
+    updateManifest(geminiPreds, 'REGION + GEMINI ✓', 0.1);
+
+  } catch (e) {
+    console.warn('[Region Gemini] failed:', e.message);
+    // COCO results already shown — no need to show error
   }
 }
 
