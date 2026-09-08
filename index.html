@@ -84,6 +84,7 @@
       <div class="action-row">
         <button class="btn-primary" id="action-btn" onclick="handleAction()">Choose image</button>
         <button class="btn-ghost"   id="stop-btn"   style="display:none" onclick="stopDetection()">&#9632; Stop</button>
+        <button class="btn-region"  id="region-btn" style="display:none" onclick="toggleRegionSelect()" title="Draw a box to detect only that area">&#9634; Select Region</button>
       </div>
 
       <input type="file" id="image-input" accept="image/*"  style="display:none" onchange="loadImage(event)" />
@@ -106,6 +107,7 @@
 
           <video id="vid-src" style="display:none" muted playsinline></video>
           <canvas id="main-canvas"></canvas>
+          <div id="region-overlay"></div>
 
           <!-- VIDEO CONTROLS -->
           <div class="vid-controls" id="vid-controls">
@@ -211,7 +213,8 @@
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.0.4/dist/tesseract.min.js"></script>
-  <script src="config.js?v=1.6"></script>
-  <script src="app.js?v=1.6"></script>
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
+  <script src="config.js?v=1.7"></script>
+  <script src="app.js?v=1.7"></script>
 </body>
 </html>

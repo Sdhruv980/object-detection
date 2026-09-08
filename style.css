@@ -217,7 +217,7 @@ body {
 /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
    ACTION ROW
 â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
-.action-row { display: flex; gap: 12px; align-items: center; }
+.action-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 
 .btn-primary {
   background: var(--accent); color: #fff;
@@ -237,6 +237,25 @@ body {
   transition: background .2s, border-color .2s;
 }
 .btn-ghost:hover { background: rgba(248,113,113,.1); border-color: #f87171; }
+
+/* Region select button */
+.btn-region {
+  background: transparent; color: #a78bfa;
+  border: 1px solid rgba(167,139,250,.45); border-radius: var(--r);
+  padding: 10px 20px; font-family: var(--sans);
+  font-size: 14px; font-weight: 600; cursor: pointer;
+  transition: background .2s, border-color .2s, box-shadow .2s;
+}
+.btn-region:hover  { background: rgba(167,139,250,.12); border-color: #a78bfa; }
+.btn-region.active { background: rgba(167,139,250,.2);  border-color: #a78bfa; box-shadow: 0 0 12px rgba(167,139,250,.4); color:#fff; }
+.canvas-wrap.region-mode { cursor: crosshair; }
+#region-overlay {
+  position: absolute; border: 2px dashed #a78bfa;
+  background: rgba(167,139,250,.08);
+  pointer-events: none; display: none;
+  box-shadow: 0 0 0 1px rgba(167,139,250,.3);
+  border-radius: 2px;
+}
 
 /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
    DETECTION LAYOUT

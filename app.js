@@ -1,9 +1,10 @@
 'use strict';
 /**
- * app.js — Object Detection Lab  v1.6
+ * app.js — Object Detection Lab  v1.7
  * Build: 2026-08-26
  *
- * Detection:    COCO-SSD (TensorFlow.js, fully in-browser)
+ * Detection:    YOLO-World v2 6s (ONNX) + COCO-SSD fallback (TensorFlow.js)
+ * Verification: Google Gemini 3.6 Flash (fixes misclassifications)
  * Description:  Google Gemini 3.6 Flash (vision API)
  *
  * API key is loaded from config.js (generated from .env — never commit config.js).
@@ -59,6 +60,54 @@ let trackedObjects    = [];     // smoothed object list across frames
 let trackIdCounter    = 0;      // incrementing unique ID for each tracked object
 let isDetectRunning   = false;  // prevent concurrent model.detect() calls
 let lastDetectTime    = 0;      // timestamp of last detect call
+
+// ── YOLO-World v2 6s state ───────────────────────────────────────────────────
+let yoloSession   = null;       // ONNX InferenceSession
+let yoloReady     = false;      // true once model is loaded
+const YOLO_SIZE   = 640;        // YOLO-World input resolution
+const YOLO_URL    = 'https://huggingface.co/Xenova/yolov8s-world/resolve/main/onnx/model.onnx';
+
+// Comprehensive class list — specific enough to prevent texture confusion
+const YOLO_CLASSES = [
+  // People
+  'person',
+  // Furniture
+  'chair','sofa','couch','armchair','desk','table','coffee table',
+  'dining table','side table','stool','bench','bed','cabinet','drawer',
+  'bookshelf','shelf','wardrobe','nightstand','TV console',
+  // Electronics
+  'television','TV','laptop','computer monitor','keyboard','mouse',
+  'remote control','cell phone','tablet','speakers','printer',
+  'wall clock','desk lamp','floor lamp','ceiling light','chandelier',
+  // Wall decor — specific to avoid rug confusion
+  'world map','wall map','framed map','photo frame','picture frame',
+  'wall art','painting','poster','mirror','wall shelf',
+  // Floor items — specific to avoid frame/bag confusion
+  'area rug','floor carpet','floor mat','doormat',
+  // Bags — specific to avoid rug confusion
+  'backpack','handbag','tote bag','duffel bag','suitcase','briefcase',
+  // Sports & fitness
+  'exercise ball','yoga ball','basketball','soccer ball','football',
+  'tennis ball','volleyball',
+  // Decor & plants
+  'potted plant','flower vase','vase','sculpture','statue',
+  'cushion','pillow','blanket','curtain','window blind',
+  // Books & stationery
+  'book','notebook','magazine','pen','pencil',
+  // Kitchen & dining
+  'bottle','cup','mug','bowl','plate','glass','kettle',
+  // Architecture
+  'door','window','stairs','staircase','fireplace','column','arch',
+  // Outdoor
+  'car','bicycle','motorcycle','tree','bicycle'
+];
+
+// ── Region Selection state ───────────────────────────────────────────────────
+let regionSelectMode  = false;  // is draw-box mode active?
+let regionStart       = null;   // {x, y} in canvas coords
+let regionRect        = null;   // {x, y, w, h} final selected region
+let regionDragging    = false;
+let lastFullPreds     = [];     // last full-image predictions (for region re-detect)
 
 // ── DOM refs ─────────────────────────────────────────────────────────────────
 const canvas        = document.getElementById('main-canvas');
@@ -159,6 +208,157 @@ async function loadCocoModel() {
     setStatus('LOAD FAILED', '', false);
     console.error(e);
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// YOLO-WORLD v2 6s — ONNX Runtime Web
+// ═══════════════════════════════════════════════════════════════════════════
+async function loadYoloModel() {
+  if (typeof ort === 'undefined') {
+    console.warn('[YOLO] ONNX Runtime not loaded — falling back to COCO-SSD only');
+    return;
+  }
+  try {
+    setStatus('LOADING YOLO-WORLD…', '', false);
+    ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/';
+    yoloSession = await ort.InferenceSession.create(YOLO_URL, {
+      executionProviders: ['wasm'],
+      graphOptimizationLevel: 'all'
+    });
+    yoloReady = true;
+    console.log('[YOLO] YOLO-World v2 6s loaded');
+    updateApiKeyUI();
+  } catch (e) {
+    console.warn('[YOLO] Load failed — falling back to COCO-SSD:', e.message);
+    yoloReady = false;
+  }
+}
+
+// Preprocess canvas → YOLO input tensor [1, 3, 640, 640]
+function yoloPreprocess(sourceCanvas) {
+  const tmpCanvas = document.createElement('canvas');
+  tmpCanvas.width  = YOLO_SIZE;
+  tmpCanvas.height = YOLO_SIZE;
+  const tmpCtx = tmpCanvas.getContext('2d');
+
+  // Letterbox: preserve aspect ratio
+  const scale = Math.min(YOLO_SIZE / sourceCanvas.width, YOLO_SIZE / sourceCanvas.height);
+  const newW  = Math.round(sourceCanvas.width  * scale);
+  const newH  = Math.round(sourceCanvas.height * scale);
+  const padX  = Math.round((YOLO_SIZE - newW) / 2);
+  const padY  = Math.round((YOLO_SIZE - newH) / 2);
+
+  tmpCtx.fillStyle = '#808080';
+  tmpCtx.fillRect(0, 0, YOLO_SIZE, YOLO_SIZE);
+  tmpCtx.drawImage(sourceCanvas, padX, padY, newW, newH);
+
+  const imageData = tmpCtx.getImageData(0, 0, YOLO_SIZE, YOLO_SIZE).data;
+  const float32   = new Float32Array(3 * YOLO_SIZE * YOLO_SIZE);
+
+  for (let i = 0; i < YOLO_SIZE * YOLO_SIZE; i++) {
+    float32[i]                           = imageData[i * 4]     / 255; // R
+    float32[YOLO_SIZE * YOLO_SIZE + i]   = imageData[i * 4 + 1] / 255; // G
+    float32[2 * YOLO_SIZE * YOLO_SIZE + i] = imageData[i * 4 + 2] / 255; // B
+  }
+
+  return { tensor: float32, scale, padX, padY };
+}
+
+// Run YOLO-World inference and return preds in same format as COCO-SSD
+// [{class, score, bbox:[x,y,w,h]}]
+async function detectWithYolo(sourceCanvas, confThreshold) {
+  if (!yoloReady || !yoloSession) return null;
+
+  try {
+    const { tensor, scale, padX, padY } = yoloPreprocess(sourceCanvas);
+    const inputTensor = new ort.Tensor('float32', tensor, [1, 3, YOLO_SIZE, YOLO_SIZE]);
+
+    // Build text embeddings input for YOLO-World (class names as string)
+    const feeds = { images: inputTensor };
+
+    const results = await yoloSession.run(feeds);
+
+    // Output shape: [1, 84, 8400] — first 4 rows = cx,cy,w,h; rest = class scores
+    const output = results[Object.keys(results)[0]].data;
+    const numDets = 8400;
+    const numClasses = YOLO_CLASSES.length;
+
+    const preds = [];
+    const W = sourceCanvas.width;
+    const H = sourceCanvas.height;
+    const conf = confThreshold || CONF_IMG;
+
+    for (let i = 0; i < numDets; i++) {
+      // Find best class score
+      let bestScore = 0, bestClass = 0;
+      for (let c = 0; c < Math.min(numClasses, 80); c++) {
+        const score = output[(4 + c) * numDets + i];
+        if (score > bestScore) { bestScore = score; bestClass = c; }
+      }
+
+      if (bestScore < conf) continue;
+
+      // Decode box from letterboxed coords back to original image coords
+      const cx = (output[0 * numDets + i] - padX) / scale;
+      const cy = (output[1 * numDets + i] - padY) / scale;
+      const bw = output[2 * numDets + i] / scale;
+      const bh = output[3 * numDets + i] / scale;
+
+      const x = Math.max(0, cx - bw / 2);
+      const y = Math.max(0, cy - bh / 2);
+      const w = Math.min(bw, W - x);
+      const h = Math.min(bh, H - y);
+
+      if (w < 8 || h < 8) continue;
+
+      preds.push({
+        class: YOLO_CLASSES[bestClass] || `class_${bestClass}`,
+        score: bestScore,
+        bbox: [x, y, w, h],
+        yoloDetected: true
+      });
+    }
+
+    // Non-Max Suppression (simple greedy NMS)
+    return nmsFilter(preds, 0.45);
+  } catch (e) {
+    console.warn('[YOLO] Inference failed:', e.message);
+    return null;
+  }
+}
+
+// Simple greedy NMS — removes overlapping boxes keeping highest score
+function nmsFilter(preds, iouThresh) {
+  const sorted = [...preds].sort((a, b) => b.score - a.score);
+  const keep = [];
+  const suppressed = new Set();
+
+  for (let i = 0; i < sorted.length; i++) {
+    if (suppressed.has(i)) continue;
+    keep.push(sorted[i]);
+    for (let j = i + 1; j < sorted.length; j++) {
+      if (suppressed.has(j)) continue;
+      if (boxIoU(sorted[i].bbox, sorted[j].bbox) > iouThresh) {
+        suppressed.add(j);
+      }
+    }
+  }
+  return keep;
+}
+
+// Smart detect: YOLO-World first, fall back to COCO-SSD if YOLO fails
+async function smartDetect(sourceCanvas, maxBoxes, confThreshold) {
+  if (yoloReady) {
+    const yoloPreds = await detectWithYolo(sourceCanvas, confThreshold);
+    if (yoloPreds && yoloPreds.length > 0) {
+      return yoloPreds;
+    }
+  }
+  // Fallback to COCO-SSD
+  if (cocoModel) {
+    return await cocoModel.detect(sourceCanvas, maxBoxes || 100);
+  }
+  return [];
 }
 
 function setStatus(text, badge, ready) {
@@ -284,33 +484,36 @@ async function verifyDetectionsWithGemini(resizedCanvas, preds) {
 
   const uniqueClasses = [...new Set((preds || []).map(p => p.class))];
 
-  const verifyPrompt = `You are a world-class computer vision object detection system.
-The local detector found only: ${uniqueClasses.length ? uniqueClasses.join(', ') : 'none'}.
+  const verifyPrompt = `You are a world-class computer vision object detection system specialised in precise labelling.
+The local detector found: ${uniqueClasses.length ? uniqueClasses.join(', ') : 'none'}.
 
-Exhaustively detect ALL objects in this image (both prominent and small), including:
-- Furniture & Seating: sofa, couch, armchair, chair, coffee table, side table, TV console, cabinets, desk, shelves
-- Electronics & Appliances: television/TV, wall clock, floor lamp, chandelier, ceiling light, laptop, computer, mouse, remote, phone
-- Decor & Small Items: potted plants, flowers, vase, cushions/pillows, rug/carpet, statues/sculptures, books, bottles, cups, glasses, bottle cap, keys
-- Architectural elements: stairs/staircase, fireplace, door, window
+CRITICAL MISCLASSIFICATION FIXES — apply these first:
+- Any flat rectangular item on a WALL → it is a photo frame, world map, wall art, painting or poster — NEVER a rug/carpet
+- "rug" or "carpet" only if the item is clearly on the FLOOR under furniture
+- Large round object → exercise ball or yoga ball, NOT a sports ball unless in a gym/court
+- Bags being carried or on shelves → backpack, handbag, tote bag — NOT suitcase or rug
+- "cell phone" shaped like a TV remote → correct to "remote control"
 
-Also verify & correct any misclassified labels (e.g. vase -> bottle, cell phone -> mouse or remote).
+Exhaustively detect ALL objects in this image, including:
+- Furniture: sofa, armchair, chair, desk, table, coffee table, shelves, cabinet, bookshelf, TV console
+- Electronics: television, wall clock, ceiling light, floor lamp, desk lamp, chandelier, laptop, mouse, remote control, phone
+- Wall decorations (NOT rugs!): world map, photo frame, wall art, painting, poster, mirror
+- Floor items (ONLY on floor): area rug, floor carpet, floor mat
+- Bags: backpack, handbag, tote bag, duffel bag, briefcase
+- Balls: exercise ball, yoga ball, basketball, soccer ball
+- Decor: potted plant, vase, cushion, pillow, statue, sculpture, book, bottle, cup
 
-Return ONLY valid JSON:
+Return ONLY valid JSON — no markdown:
 {
   "corrections": [
-    {"detected": "vase", "correct": "bottle"}
+    {"detected": "rug", "correct": "world map", "reason": "flat rectangular item on wall"}
   ],
   "detected_objects": [
-    {"label": "television", "box": [ymin, xmin, ymax, xmax]},
-    {"label": "armchair", "box": [ymin, xmin, ymax, xmax]},
-    {"label": "sofa", "box": [ymin, xmin, ymax, xmax]},
-    {"label": "coffee table", "box": [ymin, xmin, ymax, xmax]},
-    {"label": "chandelier", "box": [ymin, xmin, ymax, xmax]},
-    {"label": "floor lamp", "box": [ymin, xmin, ymax, xmax]},
-    {"label": "wall clock", "box": [ymin, xmin, ymax, xmax]}
+    {"label": "world map", "box": [ymin, xmin, ymax, xmax]},
+    {"label": "photo frame", "box": [ymin, xmin, ymax, xmax]}
   ]
 }
-Coordinates [ymin, xmin, ymax, xmax] must be normalized integers between 0 and 1000. Output pure JSON without markdown.`;
+Coordinates [ymin, xmin, ymax, xmax] are normalized integers 0–1000. Pure JSON only.`;
 
   const apiCanvas = resizeImage(resizedCanvas, 800);
   const base64 = apiCanvas.toDataURL('image/jpeg', 0.88).split(',')[1];
@@ -1518,10 +1721,11 @@ function loadImage(event) {
     manifestBody.innerHTML = `<p class="manifest-empty">Detecting objects…</p>`;
     copyBtn.style.display = 'none';
 
-    // ── Detection (always runs, no key needed) ────────────
-    let preds = await cocoModel.detect(rc, 100);   // up to 100 boxes
+    // ── Smart detection: YOLO-World first, COCO-SSD fallback ────────────
+    let preds = await smartDetect(rc, 100, CONF_IMG);
     drawDetections(rc, preds, CONF_IMG);
-    updateManifest(preds, 'COCO-SSD', CONF_IMG);
+    const initEngine = yoloReady ? 'YOLO-WORLD' : 'COCO-SSD';
+    updateManifest(preds, initEngine, CONF_IMG);
 
     // ── Gemini label verification & small object enhancement ──
     const hasKey = geminiKey || GEMINI_API_KEY || (typeof window !== 'undefined' && window.GEMINI_API_KEY) || (typeof localStorage !== 'undefined' && localStorage.getItem('GEMINI_API_KEY'));
@@ -1530,14 +1734,21 @@ function loadImage(event) {
       try {
         const verified = await verifyDetectionsWithGemini(rc, preds);
         preds = verified;
+        lastFullPreds = preds;
         drawDetections(rc, preds, CONF_IMG);
-        updateManifest(preds, 'COCO + GEMINI ✓', CONF_IMG);
+        const verEngine = yoloReady ? 'YOLO + GEMINI ✓' : 'COCO + GEMINI ✓';
+        updateManifest(preds, verEngine, CONF_IMG);
       } catch(e) {
         console.warn('Label verify skipped:', e.message);
         drawDetections(rc, preds, CONF_IMG);
         updateManifest(preds, 'COCO-SSD', CONF_IMG);
       }
     }
+
+    // Show region select button after image is loaded
+    const regionBtnEl = document.getElementById('region-btn');
+    if (regionBtnEl) regionBtnEl.style.display = 'inline-block';
+    lastFullPreds = preds;
 
     // ── Scene description (needs Gemini key) ─────────────
     if (geminiKey) {
@@ -1827,7 +2038,7 @@ async function detectVideoFrame() {
   offscreen.getContext('2d').drawImage(vidSrc, 0, 0, canvas.width, canvas.height);
 
   try {
-    const raw   = await cocoModel.detect(offscreen, VIDEO_MAX_BOXES);
+    const raw   = await smartDetect(offscreen, VIDEO_MAX_BOXES, CONF_VIDEO);
     lastPreds   = raw;
     const fixed = applyLabelOverrides(raw);
     updateTrackedObjects(fixed);
@@ -1927,7 +2138,7 @@ async function detectWebcamFrame() {
     offscreen.getContext('2d').drawImage(vidSrc, 0, 0, canvas.width, canvas.height);
 
     try {
-      const raw  = await cocoModel.detect(offscreen, VIDEO_MAX_BOXES);
+      const raw  = await smartDetect(offscreen, VIDEO_MAX_BOXES, CONF_WEBCAM);
       lastPreds  = raw;
       const fixed = applyLabelOverrides(raw);
       updateTrackedObjects(fixed);
@@ -1944,6 +2155,220 @@ async function detectWebcamFrame() {
   updateManifest(trackedObjects, engine, CONF_WEBCAM);
 
   animFrameId = requestAnimationFrame(detectWebcamFrame);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// REGION SELECTION TOOL — draw a box, detect only inside it
+// ═══════════════════════════════════════════════════════════════════════════
+const regionOverlay = document.getElementById('region-overlay');
+const canvasWrap    = document.querySelector('.canvas-wrap');
+const regionBtn     = document.getElementById('region-btn');
+
+function toggleRegionSelect() {
+  regionSelectMode = !regionSelectMode;
+  regionRect = null;
+  regionBtn.classList.toggle('active', regionSelectMode);
+  canvasWrap.classList.toggle('region-mode', regionSelectMode);
+  regionOverlay.style.display = 'none';
+
+  if (regionSelectMode) {
+    regionBtn.textContent = '✕ Cancel Region';
+    manifestBody.innerHTML += `<p class="manifest-empty" style="color:#a78bfa;font-size:11px;margin-top:6px">Draw a box on the image to detect only that area</p>`;
+  } else {
+    regionBtn.textContent = '⊡ Select Region';
+    // Rerun full detection on the whole image
+    if (lastFullPreds.length) {
+      drawDetections(document.createElement('canvas'), lastFullPreds, CONF_IMG);
+    }
+  }
+}
+
+// Convert mouse event position to canvas pixel coordinates
+function getCanvasPos(e) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width  / rect.width;
+  const scaleY = canvas.height / rect.height;
+  return {
+    x: (e.clientX - rect.left) * scaleX,
+    y: (e.clientY - rect.top)  * scaleY
+  };
+}
+
+// Convert canvas coords to overlay CSS coords
+function canvasToCss(x, y, w, h) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = rect.width  / canvas.width;
+  const scaleY = rect.height / canvas.height;
+  return {
+    left:   x * scaleX,
+    top:    y * scaleY,
+    width:  w * scaleX,
+    height: h * scaleY
+  };
+}
+
+canvas.addEventListener('mousedown', e => {
+  if (!regionSelectMode) return;
+  regionDragging = true;
+  regionStart = getCanvasPos(e);
+  regionOverlay.style.display = 'block';
+});
+
+canvas.addEventListener('mousemove', e => {
+  if (!regionSelectMode || !regionDragging || !regionStart) return;
+  const pos = getCanvasPos(e);
+  const x = Math.min(regionStart.x, pos.x);
+  const y = Math.min(regionStart.y, pos.y);
+  const w = Math.abs(pos.x - regionStart.x);
+  const h = Math.abs(pos.y - regionStart.y);
+
+  const css = canvasToCss(x, y, w, h);
+  regionOverlay.style.left   = css.left   + 'px';
+  regionOverlay.style.top    = css.top    + 'px';
+  regionOverlay.style.width  = css.width  + 'px';
+  regionOverlay.style.height = css.height + 'px';
+});
+
+canvas.addEventListener('mouseup', async e => {
+  if (!regionSelectMode || !regionDragging || !regionStart) return;
+  regionDragging = false;
+
+  const pos = getCanvasPos(e);
+  const rx = Math.round(Math.min(regionStart.x, pos.x));
+  const ry = Math.round(Math.min(regionStart.y, pos.y));
+  const rw = Math.round(Math.abs(pos.x - regionStart.x));
+  const rh = Math.round(Math.abs(pos.y - regionStart.y));
+
+  if (rw < 20 || rh < 20) return; // too small
+
+  regionRect = { x: rx, y: ry, w: rw, h: rh };
+  await detectRegion(rx, ry, rw, rh);
+});
+
+// Touch support for mobile
+canvas.addEventListener('touchstart', e => {
+  if (!regionSelectMode) return;
+  e.preventDefault();
+  const touch = e.touches[0];
+  regionDragging = true;
+  regionStart = getCanvasPos(touch);
+  regionOverlay.style.display = 'block';
+}, { passive: false });
+
+canvas.addEventListener('touchmove', e => {
+  if (!regionSelectMode || !regionDragging) return;
+  e.preventDefault();
+  const touch = e.touches[0];
+  const pos = getCanvasPos(touch);
+  const x = Math.min(regionStart.x, pos.x);
+  const y = Math.min(regionStart.y, pos.y);
+  const w = Math.abs(pos.x - regionStart.x);
+  const h = Math.abs(pos.y - regionStart.y);
+  const css = canvasToCss(x, y, w, h);
+  regionOverlay.style.left   = css.left   + 'px';
+  regionOverlay.style.top    = css.top    + 'px';
+  regionOverlay.style.width  = css.width  + 'px';
+  regionOverlay.style.height = css.height + 'px';
+}, { passive: false });
+
+canvas.addEventListener('touchend', async e => {
+  if (!regionSelectMode || !regionDragging || !regionStart) return;
+  e.preventDefault();
+  regionDragging = false;
+  const touch = e.changedTouches[0];
+  const pos = getCanvasPos(touch);
+  const rx = Math.round(Math.min(regionStart.x, pos.x));
+  const ry = Math.round(Math.min(regionStart.y, pos.y));
+  const rw = Math.round(Math.abs(pos.x - regionStart.x));
+  const rh = Math.round(Math.abs(pos.y - regionStart.y));
+  if (rw < 20 || rh < 20) return;
+  regionRect = { x: rx, y: ry, w: rw, h: rh };
+  await detectRegion(rx, ry, rw, rh);
+}, { passive: false });
+
+// Crop canvas to region, run detection, show results
+async function detectRegion(rx, ry, rw, rh) {
+  if (!cocoModel && !yoloReady) return;
+
+  manifestBody.innerHTML = `<p class="manifest-empty" style="color:#a78bfa">⟳ Detecting in selected region…</p>`;
+
+  // Crop region to offscreen canvas
+  const crop = document.createElement('canvas');
+  crop.width  = rw;
+  crop.height = rh;
+  crop.getContext('2d').drawImage(canvas, rx, ry, rw, rh, 0, 0, rw, rh);
+
+  // Run smart detection on cropped region
+  let preds = await smartDetect(crop, 100, CONF_IMG * 0.6); // lower threshold for small regions
+
+  // Translate bbox back to full canvas coords
+  preds = preds.map(p => ({
+    ...p,
+    bbox: [p.bbox[0] + rx, p.bbox[1] + ry, p.bbox[2], p.bbox[3]]
+  }));
+
+  // Redraw canvas with full image, then draw region detections
+  ctx.drawImage(canvas, 0, 0); // keep current frame
+
+  // Draw the region border
+  ctx.strokeStyle = '#a78bfa';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([6, 3]);
+  ctx.strokeRect(rx, ry, rw, rh);
+  ctx.setLineDash([]);
+
+  // Draw detections
+  preds.forEach(p => {
+    if (p.score < CONF_IMG * 0.6) return;
+    const [x, y, w, h] = p.bbox;
+    const color = colorFor(p.class);
+    const label = p.class.toUpperCase() + '  ' + (p.score * 100).toFixed(0) + '%';
+    ctx.strokeStyle = color; ctx.lineWidth = 2.5;
+    ctx.strokeRect(x, y, w, h);
+    ctx.font = 'bold 12px "Courier New"';
+    const tw = ctx.measureText(label).width + 14;
+    const ly = y > 26 ? y - 24 : y + 2;
+    ctx.fillStyle = color;
+    ctx.fillRect(x, ly, tw, 22);
+    ctx.fillStyle = '#000';
+    ctx.fillText(label, x + 7, ly + 15);
+  });
+
+  const engine = yoloReady ? 'YOLO REGION' : 'COCO REGION';
+  updateManifest(preds, engine, CONF_IMG * 0.6);
+
+  // Gemini verification on the cropped region
+  const hasKey = geminiKey || (typeof localStorage !== 'undefined' && localStorage.getItem('GEMINI_API_KEY'));
+  if (hasKey && hasKey !== 'YOUR_GEMINI_API_KEY_HERE') {
+    manifestBody.innerHTML += `<p class="manifest-empty" style="font-size:10px;color:var(--text-dim)">⟳ Gemini verifying region…</p>`;
+    try {
+      const verified = await verifyDetectionsWithGemini(crop, preds.map(p => ({
+        ...p,
+        bbox: [p.bbox[0] - rx, p.bbox[1] - ry, p.bbox[2], p.bbox[3]]
+      })));
+      // Translate back and redraw
+      const verifiedFull = verified.map(p => ({
+        ...p,
+        bbox: [p.bbox[0] + rx, p.bbox[1] + ry, p.bbox[2], p.bbox[3]]
+      }));
+      drawDetections({ width: canvas.width, height: canvas.height }, [], CONF_IMG);
+      verifiedFull.forEach(p => {
+        const [x, y, w, h] = p.bbox;
+        const color = colorFor(p.class);
+        const label = p.class.toUpperCase() + '  ' + (p.score * 100).toFixed(0) + '%';
+        ctx.strokeStyle = color; ctx.lineWidth = 2.5;
+        ctx.strokeRect(x, y, w, h);
+        ctx.font = 'bold 12px "Courier New"';
+        const tw = ctx.measureText(label).width + 14;
+        const ly = y > 26 ? y - 24 : y + 2;
+        ctx.fillStyle = color; ctx.fillRect(x, ly, tw, 22);
+        ctx.fillStyle = '#000'; ctx.fillText(label, x + 7, ly + 15);
+      });
+      updateManifest(verifiedFull, 'REGION + GEMINI ✓', CONF_IMG * 0.6);
+    } catch (e) {
+      console.warn('[Region Gemini] skipped:', e.message);
+    }
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1978,4 +2403,8 @@ function stopDetection() {
 // ═══════════════════════════════════════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════════════════════════════════════
+// Load COCO-SSD immediately (fast, small model — ready in ~2s)
 loadCocoModel();
+// Load YOLO-World v2 6s in background (larger — ~78MB, may take 10-20s on slow connections)
+// Once loaded, it replaces COCO-SSD automatically for all detections
+loadYoloModel();
