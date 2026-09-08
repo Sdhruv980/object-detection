@@ -2306,103 +2306,151 @@ canvas.addEventListener('touchend', async e => {
 
 // Crop canvas to region, run detection, show results
 async function detectRegion(rx, ry, rw, rh) {
-  if (!cocoModel && !yoloReady) return;
   if (!lastSourceCanvas) return;
 
-  manifestBody.innerHTML = `<p class="manifest-empty" style="color:#a78bfa">⟳ Detecting in selected region…</p>`;
+  manifestBody.innerHTML = `<p class="manifest-empty" style="color:#a78bfa">⟳ Analysing selected region with Gemini…</p>`;
 
-  // Crop from the clean source image (not the canvas with boxes drawn)
+  // ── Crop from clean source image ────────────────────────────────────
   const crop = document.createElement('canvas');
   crop.width  = rw;
   crop.height = rh;
   crop.getContext('2d').drawImage(lastSourceCanvas, rx, ry, rw, rh, 0, 0, rw, rh);
 
-  // Run smart detection on cropped region (lower threshold for small areas)
-  let preds = await smartDetect(crop, 100, CONF_IMG * 0.6);
+  // Upscale small crops so both COCO-SSD and Gemini have enough pixels
+  const MIN_SIDE = 320;
+  let detectCanvas = crop;
+  let upscale = 1;
+  if (rw < MIN_SIDE || rh < MIN_SIDE) {
+    upscale = Math.max(MIN_SIDE / rw, MIN_SIDE / rh);
+    detectCanvas = document.createElement('canvas');
+    detectCanvas.width  = Math.round(rw * upscale);
+    detectCanvas.height = Math.round(rh * upscale);
+    detectCanvas.getContext('2d').drawImage(crop, 0, 0, detectCanvas.width, detectCanvas.height);
+  }
 
-  // Translate bbox back to full canvas coords
-  preds = preds.map(p => ({
-    ...p,
-    bbox: [p.bbox[0] + rx, p.bbox[1] + ry, p.bbox[2], p.bbox[3]]
-  }));
+  // ── Restore image + draw region border immediately ───────────────────
+  const redrawBase = () => {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(lastSourceCanvas, 0, 0, canvas.width, canvas.height);
+    ctx.save();
+    ctx.strokeStyle = '#a78bfa'; ctx.lineWidth = 2.5;
+    ctx.setLineDash([6, 3]); ctx.strokeRect(rx, ry, rw, rh);
+    ctx.setLineDash([]); ctx.restore();
+  };
 
-  // Restore clean image first, then draw detections on top
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(lastSourceCanvas, 0, 0, canvas.width, canvas.height);
-
-  // Draw the region selection border
-  ctx.save();
-  ctx.strokeStyle = '#a78bfa';
-  ctx.lineWidth = 2;
-  ctx.setLineDash([6, 3]);
-  ctx.strokeRect(rx, ry, rw, rh);
-  ctx.setLineDash([]);
-  ctx.restore();
-
-  // Draw detections inside region
-  preds.forEach(p => {
-    if (p.score < CONF_IMG * 0.6) return;
+  const drawPred = (p) => {
+    if (p.score < 0.15) return;
     const [x, y, w, h] = p.bbox;
     const color = colorFor(p.class);
     const label = p.class.toUpperCase() + '  ' + (p.score * 100).toFixed(0) + '%';
-    ctx.strokeStyle = color; ctx.lineWidth = 2.5;
-    ctx.strokeRect(x, y, w, h);
+    ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.strokeRect(x, y, w, h);
     ctx.font = 'bold 12px "Courier New"';
     const tw = ctx.measureText(label).width + 14;
     const ly = y > 26 ? y - 24 : y + 2;
     ctx.fillStyle = color; ctx.fillRect(x, ly, tw, 22);
     ctx.fillStyle = '#000'; ctx.fillText(label, x + 7, ly + 15);
-  });
+  };
 
-  const engine = yoloReady ? 'YOLO REGION' : 'COCO REGION';
-  updateManifest(preds, engine, CONF_IMG * 0.6);
+  redrawBase();
 
-  // Gemini verification on the cropped region
+  // ── Strategy: Gemini first (best for regions), then COCO-SSD fallback ─
   const hasKey = geminiKey || (typeof localStorage !== 'undefined' && localStorage.getItem('GEMINI_API_KEY'));
+
+  let finalPreds = [];
+
   if (hasKey && hasKey !== 'YOUR_GEMINI_API_KEY_HERE') {
-    manifestBody.innerHTML += `<p class="manifest-empty" style="font-size:10px;color:var(--text-dim)">⟳ Gemini verifying region…</p>`;
+    // Use Gemini Vision directly on the crop — most accurate for arbitrary regions
     try {
-      // Pass crop-relative coords to Gemini
-      const cropRelPreds = preds.map(p => ({
-        ...p,
-        bbox: [p.bbox[0] - rx, p.bbox[1] - ry, p.bbox[2], p.bbox[3]]
-      }));
-      const verified = await verifyDetectionsWithGemini(crop, cropRelPreds);
+      const regionPrompt = `You are a precise object detection system.
+Detect and label EVERY object visible in this cropped image region.
+Be specific — distinguish between similar objects:
+- flat rectangular items on walls = photo frame / world map / wall art / painting (NOT rug)
+- round objects = exercise ball / globe / clock face (NOT sports ball unless in gym)
+- textured flat items on floor = area rug / floor mat
+- bags = backpack / handbag / tote bag
 
-      // Translate verified boxes back to full canvas coords
-      const verifiedFull = verified.map(p => ({
-        ...p,
-        bbox: [p.bbox[0] + rx, p.bbox[1] + ry, p.bbox[2], p.bbox[3]]
-      }));
+Return ONLY valid JSON — no markdown:
+{
+  "detected_objects": [
+    {"label": "world map", "score": 0.97, "box": [ymin, xmin, ymax, xmax]},
+    {"label": "photo frame", "score": 0.92, "box": [ymin, xmin, ymax, xmax]}
+  ]
+}
+Coordinates [ymin, xmin, ymax, xmax] normalized 0–1000. Be exhaustive — detect everything visible.`;
 
-      // Restore clean image and redraw with verified detections
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(lastSourceCanvas, 0, 0, canvas.width, canvas.height);
+      const base64 = detectCanvas.toDataURL('image/jpeg', 0.92).split(',')[1];
+      const payload = {
+        contents: [{ parts: [
+          { text: regionPrompt },
+          { inline_data: { mime_type: 'image/jpeg', data: base64 } }
+        ]}],
+        generationConfig: { temperature: 0.1, maxOutputTokens: 1500 }
+      };
 
-      // Draw selection border again
-      ctx.save();
-      ctx.strokeStyle = '#a78bfa'; ctx.lineWidth = 2;
-      ctx.setLineDash([6, 3]); ctx.strokeRect(rx, ry, rw, rh);
-      ctx.setLineDash([]); ctx.restore();
+      const text = await callGeminiApi(payload);
+      let parsed = null;
+      try {
+        const clean = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+        parsed = JSON.parse(clean);
+      } catch (_) {
+        const f = text.indexOf('{'), l = text.lastIndexOf('}');
+        if (f !== -1 && l !== -1) parsed = JSON.parse(text.slice(f, l + 1));
+      }
 
-      // Draw verified detections
-      verifiedFull.forEach(p => {
-        if (p.score < CONF_IMG * 0.6) return;
-        const [x, y, w, h] = p.bbox;
-        const color = colorFor(p.class);
-        const label = p.class.toUpperCase() + '  ' + (p.score * 100).toFixed(0) + '%';
-        ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.strokeRect(x, y, w, h);
-        ctx.font = 'bold 12px "Courier New"';
-        const tw = ctx.measureText(label).width + 14;
-        const ly = y > 26 ? y - 24 : y + 2;
-        ctx.fillStyle = color; ctx.fillRect(x, ly, tw, 22);
-        ctx.fillStyle = '#000'; ctx.fillText(label, x + 7, ly + 15);
-      });
-
-      updateManifest(verifiedFull, 'REGION + GEMINI ✓', CONF_IMG * 0.6);
+      if (parsed && parsed.detected_objects) {
+        for (const obj of parsed.detected_objects) {
+          if (!obj.box || obj.box.length !== 4) continue;
+          const [ymin, xmin, ymax, xmax] = obj.box;
+          // Convert from upscaled crop coords → original canvas coords
+          const bx = Math.round((xmin / 1000) * rw / upscale) + rx;
+          const by = Math.round((ymin / 1000) * rh / upscale) + ry;
+          const bw = Math.round(((xmax - xmin) / 1000) * rw / upscale);
+          const bh = Math.round(((ymax - ymin) / 1000) * rh / upscale);
+          if (bw < 5 || bh < 5) continue;
+          finalPreds.push({
+            class: obj.label || 'object',
+            score: obj.score || 0.92,
+            bbox: [bx, by, bw, bh],
+            geminiAdded: true
+          });
+        }
+      }
     } catch (e) {
-      console.warn('[Region Gemini] skipped:', e.message);
+      console.warn('[Region Gemini] failed:', e.message);
     }
+  }
+
+  // ── COCO-SSD fallback if Gemini found nothing ─────────────────────────
+  if (finalPreds.length === 0 && cocoModel) {
+    manifestBody.innerHTML = `<p class="manifest-empty" style="color:#a78bfa">⟳ Running COCO-SSD on region…</p>`;
+    try {
+      const rawPreds = await cocoModel.detect(detectCanvas, 50);
+      finalPreds = rawPreds
+        .filter(p => p.score >= 0.05)
+        .map(p => ({
+          ...p,
+          bbox: [
+            Math.round(p.bbox[0] / upscale) + rx,
+            Math.round(p.bbox[1] / upscale) + ry,
+            Math.round(p.bbox[2] / upscale),
+            Math.round(p.bbox[3] / upscale)
+          ]
+        }));
+    } catch (e) {
+      console.warn('[Region COCO] failed:', e.message);
+    }
+  }
+
+  // ── Draw results ──────────────────────────────────────────────────────
+  redrawBase();
+  finalPreds.forEach(drawPred);
+
+  if (finalPreds.length === 0) {
+    updateManifest([], 'REGION', 0.05);
+    manifestBody.innerHTML = `<p class="manifest-empty" style="color:#f87171">No objects detected in this region. Try selecting a larger area.</p>`;
+  } else {
+    const engine = hasKey ? 'REGION + GEMINI ✓' : 'REGION COCO-SSD';
+    updateManifest(finalPreds, engine, 0.15);
   }
 }
 
