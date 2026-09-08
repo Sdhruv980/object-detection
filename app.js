@@ -604,7 +604,95 @@ function handleAction() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// TESSERACT.JS OCR — Fast in-browser OCR for shipping labels
+// ═══════════════════════════════════════════════════════════════════════════
+let tesseractWorker = null;
+
+async function initTesseract() {
+  if (tesseractWorker) return tesseractWorker;
+  try {
+    tesseractWorker = await Tesseract.createWorker('eng', 1, {
+      logger: () => {} // silent
+    });
+    console.log('[Tesseract] Worker initialized');
+    return tesseractWorker;
+  } catch (e) {
+    console.warn('[Tesseract] Init failed:', e.message);
+    return null;
+  }
+}
+
+// Fast OCR with Tesseract — extracts AWB, customer name, address, PIN, total
+async function extractWithTesseract(dataUrl) {
+  try {
+    const worker = await initTesseract();
+    if (!worker) return null;
+
+    const { data } = await worker.recognize(dataUrl);
+    const text = data.text || '';
+    const conf = data.confidence || 0;
+
+    // Confidence too low — OCR probably failed
+    if (conf < 40 || text.trim().length < 20) {
+      return { confidence: conf, needsGemini: true, text };
+    }
+
+    // Parse text for structured fields using regex patterns
+    const result = {
+      confidence: conf,
+      needsGemini: false,
+      is_bill: true,
+      doc_type: 'Shipping Label',
+      vendor_name: null,
+      bill_number: null,
+      date: null,
+      customer_name: null,
+      customer_address: null,
+      pin_code: null,
+      total: null,
+      payment_method: null,
+      rawText: text
+    };
+
+    // Extract courier name (DELHIVERY, AMAZON, FLIPKART, etc.)
+    const vendorMatch = text.match(/\b(DELHIVERY|AMAZON|FLIPKART|BLUEDART|DTDC|FEDEX|DHL)\b/i);
+    if (vendorMatch) result.vendor_name = vendorMatch[1].toUpperCase();
+
+    // Extract AWB / Tracking number (usually 12-14 digits)
+    const awbMatch = text.match(/\b([A-Z0-9]{10,16})\b/);
+    if (awbMatch) result.bill_number = awbMatch[1];
+
+    // Extract PIN code (6 digits)
+    const pinMatch = text.match(/\b([0-9]{6})\b/);
+    if (pinMatch) result.pin_code = pinMatch[1];
+
+    // Extract total amount (₹ or Rs followed by digits)
+    const totalMatch = text.match(/(?:₹|Rs\.?|INR)\s*([0-9,]+(?:\.[0-9]{2})?)/i);
+    if (totalMatch) result.total = `₹${totalMatch[1]}`;
+
+    // Extract payment method
+    if (/\bCOD\b/i.test(text)) result.payment_method = 'COD';
+    else if (/\bPRE-?PAID\b/i.test(text)) result.payment_method = 'Pre-paid';
+
+    // Extract customer name (line before address, usually after "To:" or "Name:")
+    const nameMatch = text.match(/(?:To|Name|Ship\s+To):\s*([A-Za-z\s]+)/i);
+    if (nameMatch) result.customer_name = nameMatch[1].trim();
+
+    // If critical fields are missing, flag for Gemini fallback
+    if (!result.bill_number || !result.customer_name) {
+      result.needsGemini = true;
+    }
+
+    return result;
+  } catch (e) {
+    console.warn('[Tesseract] OCR error:', e.message);
+    return { confidence: 0, needsGemini: true };
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // BILL SCANNER — Multi-Bill Video OCR & Structured Data Extraction
+// Hybrid Strategy: Tesseract (fast) → Gemini fallback (accurate)
 // ═══════════════════════════════════════════════════════════════════════════
 let allBills = [];
 let billKeyframes = [];
@@ -707,7 +795,7 @@ async function loadBillVideo(event) {
   }
 
   progressBar.style.width = '55%';
-  progressTxt.textContent = `⚡ Running parallel OCR on ${keyframes.length} keyframe(s) with Gemini Flash…`;
+  progressTxt.textContent = `⚡ Running fast OCR on ${keyframes.length} keyframe(s) with Tesseract.js…`;
 
   // Draw the clearest frame to canvas
   const previewImg = new Image();
@@ -715,35 +803,55 @@ async function loadBillVideo(event) {
   ctx.drawImage(previewImg, 0, 0, canvas.width, canvas.height);
   drawScanHUD(keyframes[0].t, duration, 1, keyframes.length, 0);
 
-  // ── Step 2: Batched Gemini OCR (5 frames at a time to respect rate limits) ──
-  let lastError = null;
-  const results = [];
-  const BATCH = 5;
+  // ── Step 2: Fast Tesseract OCR on all frames (2-3 seconds total) ────
+  const tesseractResults = [];
+  const geminiFrames = [];
 
-  for (let i = 0; i < keyframes.length; i += BATCH) {
-    const batch = keyframes.slice(i, i + BATCH);
-    progressTxt.textContent = `⚡ OCR: processing frames ${i + 1}–${Math.min(i + BATCH, keyframes.length)} of ${keyframes.length}…`;
-    progressBar.style.width = (55 + ((i / keyframes.length) * 35)) + '%';
+  for (let i = 0; i < keyframes.length; i++) {
+    progressTxt.textContent = `⚡ Tesseract OCR: frame ${i + 1}/${keyframes.length}…`;
+    progressBar.style.width = (55 + ((i / keyframes.length) * 25)) + '%';
 
-    const batchResults = await Promise.all(batch.map(async (kf) => {
-      try {
-        const res = await analyzeBillFrame(kf.dataUrl);
-        return { kf, res };
-      } catch (err) {
-        lastError = err.message;
-        return { kf, res: null };
-      }
-    }));
-    results.push(...batchResults);
+    const tesseractResult = await extractWithTesseract(keyframes[i].dataUrl);
+    tesseractResults.push({ kf: keyframes[i], res: tesseractResult });
 
-    // Small pause between batches to avoid hitting Gemini rate limits
-    if (i + BATCH < keyframes.length) {
-      await new Promise(r => setTimeout(r, 300));
+    // If Tesseract failed or flagged for Gemini, queue for fallback
+    if (tesseractResult && tesseractResult.needsGemini) {
+      geminiFrames.push({ kf: keyframes[i], idx: i });
     }
   }
-  progressBar.style.width = '90%';
 
-  // ── Step 3: Parse and Deduplicate by AWB + Customer ─────────────────
+  progressBar.style.width = '80%';
+
+  // ── Step 3: Gemini Fallback for failed Tesseract frames (5-10s) ─────
+  let lastError = null;
+  if (geminiFrames.length > 0) {
+    progressTxt.textContent = `⚡ Gemini fallback: processing ${geminiFrames.length} complex frame(s)…`;
+    
+    for (let i = 0; i < geminiFrames.length; i++) {
+      const { kf, idx } = geminiFrames[i];
+      progressBar.style.width = (80 + ((i / geminiFrames.length) * 10)) + '%';
+
+      try {
+        const geminiResult = await analyzeBillFrame(kf.dataUrl);
+        if (geminiResult) {
+          tesseractResults[idx].res = geminiResult; // replace with better Gemini result
+        }
+      } catch (err) {
+        console.warn(`[Gemini fallback] Frame ${idx + 1} failed:`, err.message);
+        lastError = err.message;
+      }
+
+      // Pause between Gemini calls to respect rate limits
+      if (i < geminiFrames.length - 1) {
+        await new Promise(r => setTimeout(r, 300));
+      }
+    }
+  }
+
+  progressBar.style.width = '90%';
+  const results = tesseractResults;
+
+  // ── Step 4: Parse and Deduplicate by AWB + Customer ─────────────────
   // Show each unique bill once — deduplicate by AWB OR customer name+address
   console.log(`[OCR Results] Processing ${results.length} frames...`);
   
