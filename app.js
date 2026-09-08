@@ -108,6 +108,7 @@ let regionStart       = null;   // {x, y} in canvas coords
 let regionRect        = null;   // {x, y, w, h} final selected region
 let regionDragging    = false;
 let lastFullPreds     = [];     // last full-image predictions (for region re-detect)
+let lastSourceCanvas  = null;   // persisted copy of the loaded image (never cleared)
 
 // ── DOM refs ─────────────────────────────────────────────────────────────────
 const canvas        = document.getElementById('main-canvas');
@@ -776,6 +777,13 @@ function startGeminiInterval() {
 function selectMode(mode) {
   stopDetection();
   currentMode = mode;
+  // Clear stored image when switching away from image mode
+  if (mode !== 'image') {
+    lastSourceCanvas = null;
+    lastFullPreds    = [];
+    const regionBtnEl = document.getElementById('region-btn');
+    if (regionBtnEl) regionBtnEl.style.display = 'none';
+  }
   document.querySelectorAll('.card').forEach(c => c.classList.remove('active'));
   document.getElementById(`card-${mode}`).classList.add('active');
   actionBtn.textContent = {
@@ -1718,6 +1726,9 @@ function loadImage(event) {
     ctx.drawImage(rc, 0, 0);
     URL.revokeObjectURL(url);
 
+    // Persist a copy of the clean image so region select + stop can restore it
+    lastSourceCanvas = rc;
+
     manifestBody.innerHTML = `<p class="manifest-empty">Detecting objects…</p>`;
     copyBtn.style.display = 'none';
 
@@ -2173,12 +2184,19 @@ function toggleRegionSelect() {
 
   if (regionSelectMode) {
     regionBtn.textContent = '✕ Cancel Region';
-    manifestBody.innerHTML += `<p class="manifest-empty" style="color:#a78bfa;font-size:11px;margin-top:6px">Draw a box on the image to detect only that area</p>`;
+    // Redraw the clean image without detection boxes
+    if (lastSourceCanvas) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(lastSourceCanvas, 0, 0, canvas.width, canvas.height);
+    }
+    manifestBody.innerHTML = `<p class="manifest-empty" style="color:#a78bfa">Draw a box on the image to detect only that area</p>`;
   } else {
     regionBtn.textContent = '⊡ Select Region';
-    // Rerun full detection on the whole image
-    if (lastFullPreds.length) {
-      drawDetections(document.createElement('canvas'), lastFullPreds, CONF_IMG);
+    // Restore full-image detections
+    if (lastSourceCanvas && lastFullPreds.length) {
+      drawDetections(lastSourceCanvas, lastFullPreds, CONF_IMG);
+      const engine = yoloReady ? 'YOLO + GEMINI ✓' : 'COCO + GEMINI ✓';
+      updateManifest(lastFullPreds, engine, CONF_IMG);
     }
   }
 }
@@ -2289,17 +2307,18 @@ canvas.addEventListener('touchend', async e => {
 // Crop canvas to region, run detection, show results
 async function detectRegion(rx, ry, rw, rh) {
   if (!cocoModel && !yoloReady) return;
+  if (!lastSourceCanvas) return;
 
   manifestBody.innerHTML = `<p class="manifest-empty" style="color:#a78bfa">⟳ Detecting in selected region…</p>`;
 
-  // Crop region to offscreen canvas
+  // Crop from the clean source image (not the canvas with boxes drawn)
   const crop = document.createElement('canvas');
   crop.width  = rw;
   crop.height = rh;
-  crop.getContext('2d').drawImage(canvas, rx, ry, rw, rh, 0, 0, rw, rh);
+  crop.getContext('2d').drawImage(lastSourceCanvas, rx, ry, rw, rh, 0, 0, rw, rh);
 
-  // Run smart detection on cropped region
-  let preds = await smartDetect(crop, 100, CONF_IMG * 0.6); // lower threshold for small regions
+  // Run smart detection on cropped region (lower threshold for small areas)
+  let preds = await smartDetect(crop, 100, CONF_IMG * 0.6);
 
   // Translate bbox back to full canvas coords
   preds = preds.map(p => ({
@@ -2307,17 +2326,20 @@ async function detectRegion(rx, ry, rw, rh) {
     bbox: [p.bbox[0] + rx, p.bbox[1] + ry, p.bbox[2], p.bbox[3]]
   }));
 
-  // Redraw canvas with full image, then draw region detections
-  ctx.drawImage(canvas, 0, 0); // keep current frame
+  // Restore clean image first, then draw detections on top
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(lastSourceCanvas, 0, 0, canvas.width, canvas.height);
 
-  // Draw the region border
+  // Draw the region selection border
+  ctx.save();
   ctx.strokeStyle = '#a78bfa';
   ctx.lineWidth = 2;
   ctx.setLineDash([6, 3]);
   ctx.strokeRect(rx, ry, rw, rh);
   ctx.setLineDash([]);
+  ctx.restore();
 
-  // Draw detections
+  // Draw detections inside region
   preds.forEach(p => {
     if (p.score < CONF_IMG * 0.6) return;
     const [x, y, w, h] = p.bbox;
@@ -2328,10 +2350,8 @@ async function detectRegion(rx, ry, rw, rh) {
     ctx.font = 'bold 12px "Courier New"';
     const tw = ctx.measureText(label).width + 14;
     const ly = y > 26 ? y - 24 : y + 2;
-    ctx.fillStyle = color;
-    ctx.fillRect(x, ly, tw, 22);
-    ctx.fillStyle = '#000';
-    ctx.fillText(label, x + 7, ly + 15);
+    ctx.fillStyle = color; ctx.fillRect(x, ly, tw, 22);
+    ctx.fillStyle = '#000'; ctx.fillText(label, x + 7, ly + 15);
   });
 
   const engine = yoloReady ? 'YOLO REGION' : 'COCO REGION';
@@ -2342,28 +2362,43 @@ async function detectRegion(rx, ry, rw, rh) {
   if (hasKey && hasKey !== 'YOUR_GEMINI_API_KEY_HERE') {
     manifestBody.innerHTML += `<p class="manifest-empty" style="font-size:10px;color:var(--text-dim)">⟳ Gemini verifying region…</p>`;
     try {
-      const verified = await verifyDetectionsWithGemini(crop, preds.map(p => ({
+      // Pass crop-relative coords to Gemini
+      const cropRelPreds = preds.map(p => ({
         ...p,
         bbox: [p.bbox[0] - rx, p.bbox[1] - ry, p.bbox[2], p.bbox[3]]
-      })));
-      // Translate back and redraw
+      }));
+      const verified = await verifyDetectionsWithGemini(crop, cropRelPreds);
+
+      // Translate verified boxes back to full canvas coords
       const verifiedFull = verified.map(p => ({
         ...p,
         bbox: [p.bbox[0] + rx, p.bbox[1] + ry, p.bbox[2], p.bbox[3]]
       }));
-      drawDetections({ width: canvas.width, height: canvas.height }, [], CONF_IMG);
+
+      // Restore clean image and redraw with verified detections
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(lastSourceCanvas, 0, 0, canvas.width, canvas.height);
+
+      // Draw selection border again
+      ctx.save();
+      ctx.strokeStyle = '#a78bfa'; ctx.lineWidth = 2;
+      ctx.setLineDash([6, 3]); ctx.strokeRect(rx, ry, rw, rh);
+      ctx.setLineDash([]); ctx.restore();
+
+      // Draw verified detections
       verifiedFull.forEach(p => {
+        if (p.score < CONF_IMG * 0.6) return;
         const [x, y, w, h] = p.bbox;
         const color = colorFor(p.class);
         const label = p.class.toUpperCase() + '  ' + (p.score * 100).toFixed(0) + '%';
-        ctx.strokeStyle = color; ctx.lineWidth = 2.5;
-        ctx.strokeRect(x, y, w, h);
+        ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.strokeRect(x, y, w, h);
         ctx.font = 'bold 12px "Courier New"';
         const tw = ctx.measureText(label).width + 14;
         const ly = y > 26 ? y - 24 : y + 2;
         ctx.fillStyle = color; ctx.fillRect(x, ly, tw, 22);
         ctx.fillStyle = '#000'; ctx.fillText(label, x + 7, ly + 15);
       });
+
       updateManifest(verifiedFull, 'REGION + GEMINI ✓', CONF_IMG * 0.6);
     } catch (e) {
       console.warn('[Region Gemini] skipped:', e.message);
@@ -2389,10 +2424,26 @@ function stopDetection() {
 
   try { if (!vidSrc.paused) vidSrc.pause(); } catch(_) {}
 
-  // Clear the canvas back to blank — prevents stale bill/image showing through
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  canvas.width  = canvas.width;   // force repaint
-  hideCanvas();
+  // If there's a stored image (image mode), restore it — don't blank the canvas
+  if (lastSourceCanvas) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(lastSourceCanvas, 0, 0, canvas.width, canvas.height);
+    // Restore full detection boxes on top
+    if (lastFullPreds.length) {
+      drawDetections(lastSourceCanvas, lastFullPreds, CONF_IMG);
+    }
+  } else {
+    // Video/webcam mode — clear and hide canvas
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    canvas.width = canvas.width; // force repaint
+    hideCanvas();
+  }
+
+  // Reset region select state
+  regionSelectMode = false;
+  if (regionBtn) { regionBtn.classList.remove('active'); regionBtn.textContent = '⊡ Select Region'; }
+  if (canvasWrap) canvasWrap.classList.remove('region-mode');
+  if (regionOverlay) regionOverlay.style.display = 'none';
 
   stopBtn.style.display = 'none';
   hideVideoControls();
